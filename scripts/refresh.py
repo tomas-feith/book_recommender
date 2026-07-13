@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT / "scripts"))  # sibling-script imports
 
 from add_books import _atomic_savez, add_books  # noqa: E402
 from build_real_dataset import GB_BASE, fetch, load_csv  # noqa: E402
+from fetch_new_books import fetch_new_books  # noqa: E402
 
 DATA = ROOT / "data"
 
@@ -147,12 +148,18 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Refresh the serving catalog.")
     ap.add_argument("--add", metavar="PATH",
                     help="JSON list of new book records to ingest first.")
+    ap.add_argument("--fetch-new", type=int, metavar="N",
+                    help="Pull N new books from Open Library and ingest them.")
     ap.add_argument("--no-cf", action="store_true",
-                    help="Skip the CF rebuild (only ingest --add books).")
+                    help="Skip the CF rebuild (only ingest new books).")
     args = ap.parse_args()
 
     if args.add:
-        records = json.loads(Path(args.add).read_text(encoding="utf-8"))
+        add_books(json.loads(Path(args.add).read_text(encoding="utf-8")))
+    if args.fetch_new:
+        print(f"Fetching up to {args.fetch_new} new books from Open Library...")
+        records = fetch_new_books(want=args.fetch_new)
+        print(f"  fetched {len(records)}; ingesting...")
         add_books(records)
     if not args.no_cf:
         rebuild_cf()
