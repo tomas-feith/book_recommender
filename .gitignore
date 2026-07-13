@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+.venv39/
+venv/
+
+# Dataset build cache (downloaded source data)
+.cache/
+
+# User state — per-user swipe log, regenerated at runtime
+data/app.db

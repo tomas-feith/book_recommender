@@ -1,0 +1,10 @@
+# Core harness — runs with just this:
+numpy>=1.24
+
+# Optional: real embedding models. Install in a Python version with torch
+# wheels available (as of now, 3.11–3.13 are safest; 3.14 wheels may lag).
+#   pip install sentence-transformers
+# Then compare models, e.g.:
+#   python -m eval.run --model hashing \
+#       --model sentence-transformers/all-MiniLM-L6-v2 \
+#       --model BAAI/bge-m3 --strategy both

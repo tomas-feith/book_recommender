@@ -1,0 +1,68 @@
+# "Book match" theme — warm, literary, cozy.
+# Cream "paper" light mode + deep "ink" dark mode (both defined so the in-app
+# light/dark toggle works). Serif headings (Fraunces) pair with a clean sans
+# body (Inter); pill buttons give the swipe UI a friendly, tactile feel.
+
+[theme]
+# Shared across light/dark: typography, shape.
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+headingFont = "'Fraunces':https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+baseFontSize = 15
+baseFontWeight = 400
+headingFontSizes = ["34px", "26px", "21px", "18px", "15px", "13px"]
+headingFontWeights = [600, 600, 600, 600, 500, 500]
+baseRadius = "12px"
+buttonRadius = "full"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+chartCategoricalColors = ["#B5451D", "#3F7D5B", "#3A6EA5", "#7A5C9E", "#B8860B", "#C0392B", "#8A7B69"]
+
+[theme.light]
+primaryColor = "#B5451D"              # warm terracotta/rust
+backgroundColor = "#FBF7F0"           # cream paper
+secondaryBackgroundColor = "#F2EADD"  # warmer card/widget fill
+textColor = "#2B2119"                 # dark espresso
+linkColor = "#B5451D"
+borderColor = "#E3D8C6"
+codeBackgroundColor = "#F2EADD"
+codeTextColor = "#2B2119"
+redColor = "#C0392B"
+orangeColor = "#B5451D"
+yellowColor = "#B8860B"
+greenColor = "#3F7D5B"
+blueColor = "#3A6EA5"
+violetColor = "#7A5C9E"
+grayColor = "#8A7B69"
+
+[theme.light.sidebar]
+backgroundColor = "#F2EADD"
+secondaryBackgroundColor = "#E8DCC8"
+borderColor = "#E3D8C6"
+primaryColor = "#B5451D"
+textColor = "#2B2119"
+
+[theme.dark]
+primaryColor = "#E07A4F"              # lifted terracotta for dark contrast
+backgroundColor = "#1A1614"           # warm ink
+secondaryBackgroundColor = "#241E1A"
+textColor = "#EDE4D8"                 # warm off-white
+linkColor = "#E8916B"
+borderColor = "#3A322C"
+codeBackgroundColor = "#241E1A"
+codeTextColor = "#EDE4D8"
+redColor = "#E5766A"
+orangeColor = "#E07A4F"
+yellowColor = "#D8A94A"
+greenColor = "#6FB08A"
+blueColor = "#6FA0D0"
+violetColor = "#B79AD6"
+grayColor = "#A7998A"
+
+[theme.dark.sidebar]
+backgroundColor = "#241E1A"
+secondaryBackgroundColor = "#2E2621"
+borderColor = "#3A322C"
+primaryColor = "#E07A4F"
+textColor = "#EDE4D8"

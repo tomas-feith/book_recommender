@@ -1,0 +1,10 @@
+[
+  {"user": "fantasy_fan",        "likes": ["f1", "f2", "f3", "f4", "f6", "f7"], "dislikes": ["r4", "n3"]},
+  {"user": "scifi_fan",          "likes": ["s1", "s2", "s3", "s4", "s6", "s8"], "dislikes": ["r1", "r7"]},
+  {"user": "mystery_fan",        "likes": ["m1", "m2", "m3", "m5", "m6", "m7"], "dislikes": ["n2", "f5"]},
+  {"user": "romance_fan",        "likes": ["r2", "r3", "r4", "r5", "r6", "r8"], "dislikes": ["s4", "n4"]},
+  {"user": "litfic_fan",         "likes": ["l1", "l2", "l3", "l5", "l7", "l8"], "dislikes": ["r2", "m5"]},
+  {"user": "science_reader",     "likes": ["n1", "n2", "n3", "n5", "n7", "n8"], "dislikes": ["r4", "f2"]},
+  {"user": "fantasy_scifi_fan",  "likes": ["f1", "f3", "f6", "s1", "s2", "s8"], "dislikes": ["r7", "l4"]},
+  {"user": "romance_mystery_fan","likes": ["r2", "r5", "r8", "m1", "m3", "m6"], "dislikes": ["n2", "s6"]}
+]
