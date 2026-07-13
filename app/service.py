@@ -108,6 +108,11 @@ class BookRecommenderService:
             self.store.reactions(user_id), _clean_filters(filters), n=n
         )
 
+    def surprises(self, user_id: str, n: int = 10, **filters) -> List[Scored]:
+        return self.recommender.surprise(
+            self.store.reactions(user_id), _clean_filters(filters), n=n
+        )
+
     def genres(self) -> List[str]:
         return self.catalog.all_genres()
 

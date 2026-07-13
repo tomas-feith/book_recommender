@@ -43,6 +43,7 @@ class Scored:
     book: dict
     score: float
     cf_weight: float   # how much CF drove this pick (0 = pure content)
+    novelty: float = 0.0  # 1 - cosine to nearest liked book (set for surprise picks)
 
 
 class Recommender:
@@ -172,6 +173,58 @@ class Recommender:
         if n_explore:
             picks += self._explore(order, set(picks), n_explore, rng)
         return self._as_scored(picks, liked, disliked, interested)
+
+    def surprise(
+        self,
+        reactions: Dict[str, str],
+        filters: dict,
+        n: int = 10,
+        relevance_quantile: float = 0.75,
+        per_author: int = 2,
+    ) -> List[Scored]:
+        """Serendipity: books UNLIKE your taste that still score strongly.
+
+        Two independent axes make this possible: content (cosine to your taste
+        centroid) and CF (readers-like-you). We gate to candidates in the top
+        ``1 - relevance_quantile`` of blended score -- so every pick is still a
+        confident recommendation -- then rank those by *novelty*: distance to the
+        nearest book you've liked. A high-scoring, far-from-taste book is one the
+        CF channel is carrying, i.e. "readers like you love it, though it's
+        nothing like your usual reads."
+
+        Needs positive signal to define "your taste"; returns [] for cold users.
+        """
+        liked, disliked, interested = self._split(reactions)
+        pos = liked + interested
+        if not pos:
+            return []
+        cand = np.where(self._candidate_mask(reactions, filters))[0]
+        if len(cand) == 0:
+            return []
+
+        rel = self._scores(liked, disliked, interested, cand)
+        # Gate: keep only strongly-recommended candidates.
+        keep_mask = rel >= np.quantile(rel, relevance_quantile)
+        keep, keep_rel = cand[keep_mask], rel[keep_mask]
+
+        # Novelty = 1 - cosine to the nearest liked/interested book.
+        nearest = (self.cat.emb[keep] @ self.cat.emb[pos].T).max(axis=1)
+        novelty = 1.0 - nearest
+
+        out, author_count = [], {}
+        for j in np.argsort(-novelty):  # most novel first
+            i = int(keep[j])
+            author = self._primary_author(i)
+            if author and author_count.get(author, 0) >= per_author:
+                continue
+            author_count[author] = author_count.get(author, 0) + 1
+            out.append(Scored(
+                book=self.cat.books[i], score=float(keep_rel[j]),
+                cf_weight=float(self.cf_weight[i]), novelty=float(novelty[j]),
+            ))
+            if len(out) == n:
+                break
+        return out
 
     # ---- selection helpers --------------------------------------------------
 

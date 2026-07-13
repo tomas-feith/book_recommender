@@ -238,8 +238,8 @@ if st.session_state.phase == "onboarding":
 
 else:
     wish_n = svc.profile_summary(st.session_state.user_id)["interested"]
-    discover, for_you, reading = st.tabs(
-        ["Discover", "For you", f"Reading list ({wish_n})"]
+    discover, for_you, surprise_tab, reading = st.tabs(
+        ["Discover", "For you", "Surprise me", f"Reading list ({wish_n})"]
     )
 
     with discover:
@@ -304,6 +304,36 @@ else:
                             st.button("Not for me", icon=":material/close:",
                                       key=f"fy_no_{r.book['id']}", on_click=react,
                                       args=(r.book["id"], "dislike"))
+
+    with surprise_tab:
+        surprises = svc.surprises(st.session_state.user_id, n=9, **current_filters())
+        if not surprises:
+            st.caption("Like a few books first — then we'll find reads that are "
+                       "**nothing like** your usual taste but that readers like "
+                       "you still love.")
+        else:
+            st.caption("Wildcards: far from what you usually read, but readers "
+                       "with your taste rate them highly. Save one or dismiss it.")
+            cols = st.columns(3)
+            for i, s in enumerate(surprises):
+                with cols[i % 3]:
+                    with st.container(border=True):
+                        cover(st, s.book)
+                        st.markdown(f"**{s.book['title'][:44]}**")
+                        st.caption(s.book.get("author", ""))
+                        if genre_badges(s.book, n=2):
+                            st.markdown(genre_badges(s.book, n=2))
+                        st.caption(
+                            f":material/auto_awesome: {int(round(s.novelty * 100))}% "
+                            "outside your usual — CF-driven"
+                        )
+                        with st.container(horizontal=True):
+                            st.button("Save", icon=":material/bookmark_add:",
+                                      key=f"sp_save_{s.book['id']}", on_click=react,
+                                      args=(s.book["id"], "interested"))
+                            st.button("Not for me", icon=":material/close:",
+                                      key=f"sp_no_{s.book['id']}", on_click=react,
+                                      args=(s.book["id"], "dislike"))
 
     with reading:
         wish = svc.wishlist(st.session_state.user_id)
