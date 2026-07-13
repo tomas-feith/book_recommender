@@ -1,0 +1,162 @@
+"""Periodic refresh job -- keep the serving catalog fresh over time.
+
+Two things drift after the initial build:
+
+1. **New books** appear. Pass ``--add PATH`` to ingest a JSON list of new book
+   records; this delegates to :func:`add_books.add_books` (embeds the new books,
+   appends them CF-cold).
+
+2. **Signal accumulates.** The initial CF matrix only knows the original
+   goodbooks ratings. Every day the app runs, users leave likes / 'interested' /
+   dislikes in ``data/app.db``. This job rebuilds the item-item CF matrix from
+   **all** of that signal -- goodbooks ratings PLUS the app's own swipes -- so
+   books people actually engage with gain collaborative warmth, and a new book
+   that accrues swipes stops being CF-cold.
+
+Swipes become pseudo-ratings on goodbooks' 1-5 scale:
+
+    like -> 5    interested -> 4    dislike -> 2    skip -> ignored
+
+The offline-eval users (``data/real_profiles.json``) are kept OUT of the CF
+training set, exactly as ``scripts/build_real_dataset.py`` does, so the eval
+harness stays honest after a refresh.
+
+Run (in the uv env):
+    uv run --no-sync python scripts/refresh.py                  # rebuild CF from swipes
+    uv run --no-sync python scripts/refresh.py --add new.json   # ingest, then rebuild
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))  # sibling-script imports
+
+from add_books import _atomic_savez, add_books  # noqa: E402
+from build_real_dataset import GB_BASE, fetch, load_csv  # noqa: E402
+
+DATA = ROOT / "data"
+
+# Swipe reaction -> pseudo-rating on goodbooks' 1-5 scale ('skip' contributes none).
+SWIPE_RATING = {"like": 5.0, "interested": 4.0, "dislike": 2.0}
+
+
+def _catalog_order() -> List[str]:
+    books = json.loads((DATA / "real_books.json").read_text(encoding="utf-8"))
+    return [b["id"] for b in books]
+
+
+def _eval_user_ids() -> set:
+    """goodbooks user ids reserved for offline eval -- excluded from CF training."""
+    path = DATA / "real_profiles.json"
+    if not path.exists():
+        return set()
+    profiles = json.loads(path.read_text(encoding="utf-8"))
+    return {p["user"].removeprefix("gr_") for p in profiles}
+
+
+def _goodbooks_ratings(order: set) -> Dict[str, Dict[str, int]]:
+    """Per-user {book_id: rating} from goodbooks, restricted to catalog books."""
+    text = fetch(GB_BASE + "ratings.csv", "gb_ratings.csv")
+    by_user: Dict[str, Dict[str, int]] = defaultdict(dict)
+    for row in load_csv(text):
+        bid = row["book_id"]
+        if bid in order:
+            by_user[row["user_id"]][bid] = int(row["rating"])
+    return by_user
+
+
+def _app_ratings(order: set) -> Dict[str, Dict[str, float]]:
+    """Per-user pseudo-ratings from the app's swipe log (app.db)."""
+    db = DATA / "app.db"
+    if not db.exists():
+        return {}
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute("SELECT user_id, book_id, reaction FROM swipes").fetchall()
+    finally:
+        conn.close()
+    by_user: Dict[str, Dict[str, float]] = defaultdict(dict)
+    for user_id, book_id, reaction in rows:
+        if book_id in order and reaction in SWIPE_RATING:
+            by_user[user_id][book_id] = SWIPE_RATING[reaction]
+    return by_user
+
+
+def _item_item_cf(order: List[str], by_user: Dict[str, Dict[str, float]]):
+    """Adjusted (user-mean-centered) cosine item-item similarity + popularity."""
+    idx = {bid: i for i, bid in enumerate(order)}
+    n = len(order)
+    users = [u for u, r in by_user.items() if r]
+    mat = np.zeros((n, len(users)), dtype=np.float32)
+    pop = np.zeros(n, dtype=np.float32)
+    for col, u in enumerate(users):
+        ratings = by_user[u]
+        mean = sum(ratings.values()) / len(ratings)
+        for bid, r in ratings.items():
+            row = idx[bid]
+            mat[row, col] = r - mean
+            pop[row] += 1.0
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    mat_n = mat / norms
+    sim = (mat_n @ mat_n.T).astype(np.float32)
+    np.fill_diagonal(sim, 0.0)
+    return sim, pop, len(users)
+
+
+def rebuild_cf(data_dir: Path = DATA) -> None:
+    order = _catalog_order()
+    order_set = set(order)
+
+    gb = _goodbooks_ratings(order_set)
+    eval_uids = _eval_user_ids()
+    app = _app_ratings(order_set)
+
+    # Combine: goodbooks non-eval users + all app users. Namespaced keys so a
+    # goodbooks id and an app id can never collide.
+    combined: Dict[str, Dict[str, float]] = {}
+    for uid, ratings in gb.items():
+        if uid not in eval_uids:
+            combined[f"gb:{uid}"] = ratings
+    for uid, ratings in app.items():
+        combined[f"app:{uid}"] = dict(ratings)
+
+    sim, pop, n_users = _item_item_cf(order, combined)
+    _atomic_savez(
+        data_dir / "real_cf.npz",
+        ids=np.array(order, dtype=str), sim=sim, pop=pop,
+    )
+    n_app = sum(1 for k in combined if k.startswith("app:"))
+    print(f"Rebuilt CF ({len(order)}x{len(order)}) from {n_users} users "
+          f"({n_app} from app swipes) -> {data_dir / 'real_cf.npz'}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Refresh the serving catalog.")
+    ap.add_argument("--add", metavar="PATH",
+                    help="JSON list of new book records to ingest first.")
+    ap.add_argument("--no-cf", action="store_true",
+                    help="Skip the CF rebuild (only ingest --add books).")
+    args = ap.parse_args()
+
+    if args.add:
+        records = json.loads(Path(args.add).read_text(encoding="utf-8"))
+        add_books(records)
+    if not args.no_cf:
+        rebuild_cf()
+
+
+if __name__ == "__main__":
+    main()
