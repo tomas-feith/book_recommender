@@ -105,13 +105,14 @@ Every book is three aligned artifacts, all keyed by book id:
 |--------|---------|
 | `scripts/build_real_dataset.py` | Build the whole dataset from goodbooks-10k: top-`N_BOOKS` (=1000) by rating count, reader shelf-tags as genres, Open Library descriptions, 120 focused eval users, and the CF matrix (from ~53k *non-eval* users, so the harness stays honest). |
 | `scripts/build_embeddings.py`   | Cache `bge-small-en-v1.5` vectors (1000×384) so serving never loads torch. |
+| `scripts/fetch_new_books.py`    | Pull genuinely-new books from the **Open Library** search API (by subject, English, recent-year range, ranked by reader count; requires author + cover). Maps to the catalog schema with `ol:`-prefixed ids and dedups against existing ids/titles. |
 | `scripts/add_books.py`          | **Incrementally** append new books to all three artifacts — embeds only the new ones (same model, guarded), grows CF with zero rows so new books start cold (pop=0, content-ranked). Idempotent, atomic. |
-| `scripts/refresh.py`            | **Periodic refresh.** Rebuilds CF from *all* accumulated signal — goodbooks ratings **plus the app's own swipe log** (like/interested/dislike → pseudo-ratings 5/4/2) — so engaged books gain collaborative warmth over time and formerly-cold books warm up. `--add PATH` ingests new books first. Eval users stay excluded. |
+| `scripts/refresh.py`            | **Periodic refresh.** Rebuilds CF from *all* accumulated signal — goodbooks ratings **plus the app's own swipe log** (like/interested/dislike → pseudo-ratings 5/4/2) — so engaged books gain collaborative warmth over time and formerly-cold books warm up. `--add PATH` ingests a file first; `--fetch-new N` pulls N new books from Open Library and ingests them in one step. Eval users stay excluded. |
 
 ```bash
 uv run --no-sync python scripts/build_real_dataset.py   # full rebuild
 uv run --no-sync python scripts/build_embeddings.py     # re-embed
-uv run --no-sync python scripts/add_books.py new.json    # add books
+uv run --no-sync python scripts/refresh.py --fetch-new 20  # pull new releases + rebuild CF
 uv run --no-sync python scripts/refresh.py               # rebuild CF from swipes
 ```
 
@@ -197,11 +198,13 @@ database-shaped. Nothing in `recommender.py` / `service.py` moves.
 
 ## What this deliberately is *not* (yet)
 
-- **Multi-taste profiles.** A single centroid can't fully represent someone who
-  likes literary fiction *and* hard sci-fi. When it matters, upgrade
-  `profiles.py` to per-cluster centroids or a small per-user classifier — and the
-  harness tells you if it helped.
+- **Multi-taste profiles.** A single centroid can't perfectly represent someone
+  who likes literary fiction *and* hard sci-fi. Per-cluster centroids were built
+  and evaluated (held-out Recall@10) and **lost** to the pooled mean — sub-centroids
+  from a handful of likes overfit, and no real user's tastes were separable enough
+  to help (see git history). A per-user classifier with more signal may still be
+  worth trying; the harness will say if it helped.
 - **Auth.** Profiles are name-only and URL-resumable; there are no passwords.
-- **A live ingestion source.** `add_books.py` / `refresh.py` are the machinery;
-  wiring them to a real new-releases feed (Open Library, Google Books) is the next
-  step.
+- **Scheduling ingestion.** `fetch_new_books.py` + `refresh.py --fetch-new` are the
+  live pipeline; running them on a cron/schedule (and expanding beyond Open Library
+  to e.g. Google Books) is the remaining operational step.
