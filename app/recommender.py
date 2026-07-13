@@ -75,7 +75,14 @@ class Recommender:
         return vec / norm if norm else vec
 
     def _scores(self, liked, disliked, interested, cand: np.ndarray) -> np.ndarray:
-        """Adaptive-hybrid score for each candidate index in ``cand``."""
+        """Adaptive-hybrid score for each candidate index in ``cand``.
+
+        Note: a *single* Rocchio centroid is used deliberately. Per-cluster
+        multi-taste profiles were built and evaluated on the real profiles
+        (held-out Recall@10) and consistently underperformed the pooled mean --
+        sub-centroids from a handful of likes overfit, and no real user's tastes
+        were separable enough to help. See git history for the experiment.
+        """
         profile = self._profile(liked, disliked, interested)
         if profile is None:
             # Cold user, no signal yet: fall back to popularity.
