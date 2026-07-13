@@ -34,7 +34,7 @@ CACHE.mkdir(parents=True, exist_ok=True)
 GB_BASE = "https://raw.githubusercontent.com/zygmuntz/goodbooks-10k/master/"
 UA = {"User-Agent": "book-rec-eval/0.1"}
 
-N_BOOKS = 400          # top books by rating count
+N_BOOKS = 1000         # top books by rating count
 MIN_RATED = 10         # a user must have rated at least this many of the subset
 MAX_RATED = 40         # ...but not be an omnivore who rated a huge share of it
 MIN_LIKES = 6          # enough positive signal to build a profile + hold out
