@@ -77,14 +77,21 @@ def load_authors(path: Optional[Path]) -> Dict[str, str]:
     return {str(a["author_id"]): a.get("name", "") for a in stream_jsonl_gz(path)}
 
 
-def load_genres(path: Optional[Path]) -> Dict[str, List[str]]:
-    """book_id -> ranked genre list (UCSD genres file is {book_id, genres:{g:count}})."""
+def load_genres(path: Optional[Path], keep: Optional[set] = None) -> Dict[str, List[str]]:
+    """book_id -> ranked genre list (UCSD genres file is {book_id, genres:{g:count}}).
+
+    The genres file covers ALL ~2.3M books; pass ``keep`` (a set of raw book_ids)
+    to hold only the selected subset in memory.
+    """
     if not path:
         return {}
     out: Dict[str, List[str]] = {}
     for row in stream_jsonl_gz(path):
+        bid = str(row["book_id"])
+        if keep is not None and bid not in keep:
+            continue
         genres = row.get("genres") or {}
-        out[str(row["book_id"])] = [g for g, _ in sorted(genres.items(), key=lambda kv: -kv[1])][:5]
+        out[bid] = [g for g, _ in sorted(genres.items(), key=lambda kv: -kv[1])][:5]
     return out
 
 
@@ -163,8 +170,9 @@ def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data
 
     print(f"Selecting top {top_n} books by rating count...")
     raw_books = select_top_books(books_path, top_n)
+    keep_raw = {str(r["book_id"]) for r in raw_books}
     authors = load_authors(authors_path)
-    genres = load_genres(genres_path)
+    genres = load_genres(genres_path, keep=keep_raw)
     books = [to_record(r, authors, genres) for r in raw_books]
     order = [b["id"] for b in books]
     keep = set(order)
