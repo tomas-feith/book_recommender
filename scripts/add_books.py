@@ -88,6 +88,19 @@ def _normalize(record: dict) -> dict:
     return out
 
 
+def _resolve_model(label: str, data_dir: Path) -> str:
+    """Map a stored embedding *label* to a loadable model.
+
+    The catalog vectors are tagged e.g. ``'coread-finetuned bge-small'`` -- a
+    description, not a path. Load the actual co-read encoder dir when present so
+    new books land in the SAME space; otherwise the label is a real HF model name.
+    """
+    coread = data_dir / "coread-encoder"
+    if "coread" in label.lower() and coread.exists():
+        return str(coread)
+    return label
+
+
 def _embed(texts: list[str], model: str) -> np.ndarray:
     from eval.embedders import SentenceTransformerEmbedder  # lazy: needs torch
 
@@ -137,14 +150,14 @@ def add_books(new_records: Iterable[dict], data_dir: Path = DATA, model: str | N
         )
 
     print(f"Embedding {len(to_add)} new book(s) with {model} ...")
-    new_emb = _embed([book_to_text(b) for b in to_add], model)
+    new_emb = _embed([book_to_text(b) for b in to_add], _resolve_model(model, data_dir))
 
     # --- metadata: append
     books.extend(to_add)
 
     # --- embeddings: stack new rows, extend ids
     new_ids = [b["id"] for b in to_add]
-    emb = np.vstack([old_emb, new_emb]).astype(np.float32)
+    emb = np.vstack([old_emb, new_emb]).astype(np.float16)  # keep fp16 storage
     emb_ids = np.concatenate([old_emb_ids, np.array(new_ids, dtype=str)])
 
     # --- CF: grow N x N -> M x M with empty rows/cols (cold-start), pop = 0.

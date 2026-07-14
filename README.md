@@ -8,8 +8,12 @@ adaptive-hybrid recommender re-ranks after every swipe. The product sits on top 
 harness** that picked the embedding model and the recommender architecture on
 real numbers instead of vibes; that evidence is documented at the bottom.
 
-The serving catalog is **10,000 real books** (all of goodbooks-10k), with real
-reader shelf-tags as genres and Open Library descriptions.
+The serving catalog is **~10,150 real books**: all of goodbooks-10k (real reader
+shelf-tags as genres, Open Library descriptions) plus **recent 2022-2025 releases**
+pulled from Open Library (goodbooks is frozen at 2017), ingested CF-cold via
+`scripts/add_books.py` (seed list in `data/recent_books.json`; re-add after a
+rebuild with `refresh.py --add data/recent_books.json`). New books are ranked by
+the co-read content encoder until they accrue reactions.
 
 ## Quick start
 
