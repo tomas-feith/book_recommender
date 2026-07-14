@@ -47,7 +47,11 @@ class QuotaExceeded(RuntimeError):
     """Google Books returned 429 -- the anonymous quota is a shared, exhausted pool."""
 
 
-def _query(title: str, author: str, api_key: Optional[str] = None) -> Optional[dict]:
+class BackendUnavailable(RuntimeError):
+    """Google Books search returned 503 backendFailed on every retry (Google-side)."""
+
+
+def _query(title: str, author: str, api_key: Optional[str] = None, retries: int = 3) -> Optional[dict]:
     q = f'intitle:{title}'
     if author:
         q += f' inauthor:{author.split(",")[0]}'
@@ -55,24 +59,51 @@ def _query(title: str, author: str, api_key: Optional[str] = None) -> Optional[d
     if api_key:
         params["key"] = api_key
     url = f"{API}?{urllib.parse.urlencode(params)}"
-    try:
-        data = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=15))
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            raise QuotaExceeded(
-                "Google Books returned 429 (quota exceeded). The unauthenticated "
-                "quota is a shared pool; set GOOGLE_BOOKS_API_KEY or pass --api-key "
-                "with a free key from console.cloud.google.com."
-            )
-        return None
-    except Exception:
-        return None
+    for attempt in range(retries):
+        try:
+            return _pick(json.load(urllib.request.urlopen(
+                urllib.request.Request(url, headers=UA), timeout=15)))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                raise QuotaExceeded(
+                    "Google Books returned 429 (quota exceeded). The unauthenticated "
+                    "quota is a shared pool; set GOOGLE_BOOKS_API_KEY or pass --api-key "
+                    "with a free key from console.cloud.google.com."
+                )
+            if e.code == 503 and attempt < retries - 1:
+                time.sleep(2 * (attempt + 1))  # backendFailed is often transient
+                continue
+            if e.code == 503:
+                raise BackendUnavailable(
+                    "Google Books search returned 503 (backendFailed) on every retry. "
+                    "This is a Google-side outage of the search endpoint; try again later."
+                )
+            return None
+        except Exception:
+            return None
+    return None
+
+
+def _pick(data: dict) -> Optional[dict]:
     items = data.get("items") or []
     return items[0].get("volumeInfo", {}) if items else None
 
 
+def _load_dotenv() -> None:
+    """Load KEY=VALUE lines from a repo-root .env into the environment (no overwrite)."""
+    env = ROOT / ".env"
+    if not env.exists():
+        return
+    for line in env.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
 def enrich(data_dir: Path = DATA, limit: int = 200, re_embed: bool = True,
            api_key: Optional[str] = None) -> int:
+    _load_dotenv()
     api_key = api_key or os.environ.get("GOOGLE_BOOKS_API_KEY")
     books = json.loads((data_dir / "real_books.json").read_text(encoding="utf-8"))
     cache = json.loads(CACHE.read_text()) if CACHE.exists() else {}
@@ -91,7 +122,7 @@ def enrich(data_dir: Path = DATA, limit: int = 200, re_embed: bool = True,
         if key not in cache:
             try:
                 info = _query(b["title"], b.get("author", ""), api_key)
-            except QuotaExceeded as e:
+            except (QuotaExceeded, BackendUnavailable) as e:
                 print(f"Aborting: {e}")
                 break
             cache[key] = info or {}
