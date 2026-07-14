@@ -7,6 +7,7 @@ import io
 from openpyxl import Workbook
 
 from app.library import LibraryEntry, parse_library
+from app.recommender import Recommender
 from app.search import TitleIndex
 from app.service import BookRecommenderService
 from app.store import SwipeStore
@@ -77,8 +78,12 @@ def _service(catalog, tmp_path) -> BookRecommenderService:
     """A service wired to a synthetic catalog without touching real data files."""
     svc = BookRecommenderService.__new__(BookRecommenderService)
     svc.catalog = catalog
+    svc.recommender = Recommender(catalog)
     svc.titles = TitleIndex(catalog)
     svc.store = SwipeStore(db_path=tmp_path / "app.db")
+    svc.data_dir = tmp_path
+    svc._encoder_loaded = True  # pretend the encoder is unavailable (no torch in tests)
+    svc._encoder_cache = None
     return svc
 
 
@@ -108,4 +113,18 @@ def test_author_disambiguates_and_records_reaction(tiny_catalog, tmp_path):
     assert result.n_matched == 1
     assert result.matched[0].match.book_id == "b4"
     assert svc.store.reactions(uid) == {"b4": "interested"}
+    svc.store.close()
+
+
+def test_similar_books_via_service(tiny_catalog, tmp_path):
+    svc = _service(tiny_catalog, tmp_path)
+    sims = svc.similar_books("b0", n=3)
+    assert sims and "b0" not in {s.book["id"] for s in sims}
+    svc.store.close()
+
+
+def test_semantic_search_falls_back_without_encoder(tiny_catalog, tmp_path):
+    svc = _service(tiny_catalog, tmp_path)  # encoder forced unavailable
+    assert svc.semantic_search("books about the desert") == []
+    assert svc.semantic_search("") == []
     svc.store.close()

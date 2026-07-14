@@ -87,6 +87,7 @@ class Scored:
     score: float
     cf_weight: float  # how much CF drove this pick (0 = pure content)
     novelty: float = 0.0  # 1 - cosine to nearest liked book (set for surprise picks)
+    explanation: str = ""  # human "why recommended", from the driving signal
 
 
 class Recommender:
@@ -407,7 +408,68 @@ class Recommender:
         if not idxs:
             return []
         scores = self._scores(liked, disliked, interested, np.array(idxs))
+        pos = list(liked) + list(interested)
         return [
-            Scored(book=self.cat.books[i], score=float(s), cf_weight=float(self.cf_weight[i]))
+            Scored(
+                book=self.cat.books[i],
+                score=float(s),
+                cf_weight=float(self.cf_weight[i]),
+                explanation=self._explain(i, pos),
+            )
             for i, s in zip(idxs, scores, strict=True)
+        ]
+
+    def _explain(self, i: int, pos: Sequence[int]) -> str:
+        """A one-line 'why recommended', attributed to the driving signal.
+
+        CF-driven picks cite the liked book whose readers most overlap; content-
+        driven picks cite the most similar liked book. Cold users get a neutral line.
+        """
+        if not pos:
+            return "A popular pick to get you started"
+        title = self.cat.books  # local alias
+        cf = np.asarray(self.cat.sim.getrow(i)[:, list(pos)].todense()).ravel()
+        if self.cf_weight[i] >= 0.5 and cf.size and cf.max() > 0:
+            j = pos[int(np.argmax(cf))]
+            return f'Readers who liked "{title[j]["title"]}" also enjoyed this'
+        content = self.cat.emb[list(pos)] @ self.cat.emb[i]
+        j = pos[int(np.argmax(content))]
+        return f'Because you liked "{title[j]["title"]}"'
+
+    def similar(self, book_id: str, n: int = 10, per_author: int = 2) -> list[Scored]:
+        """Books most like a given one -- 'More like this'.
+
+        Blends content similarity (embedding cosine) and CF ('read together'),
+        weighted by the seed book's own CF warmth, excluding the book itself and
+        capping per author so a series doesn't fill the shelf.
+        """
+        if book_id not in self.cat.id_to_idx:
+            return []
+        i = self.cat.idx(book_id)
+        content = self.cat.emb @ self.cat.emb[i]
+        cf = np.asarray(self.cat.sim.getrow(i).todense()).ravel()
+        w = float(self.cf_weight[i])
+        score = w * _standardize(cf) + (1.0 - w) * _standardize(content)
+        score[i] = -1e18  # never recommend the book itself
+        picks: list[int] = []
+        author_count: dict[str, int] = {}
+        for j in np.argsort(-score):
+            j = int(j)
+            author = self._primary_author(j)
+            if author and author_count.get(author, 0) >= per_author:
+                continue
+            picks.append(j)
+            if author:
+                author_count[author] = author_count.get(author, 0) + 1
+            if len(picks) == n:
+                break
+        seed_title = self.cat.books[i]["title"]
+        return [
+            Scored(
+                book=self.cat.books[j],
+                score=float(score[j]),
+                cf_weight=float(self.cf_weight[j]),
+                explanation=f'Similar to "{seed_title}"',
+            )
+            for j in picks
         ]

@@ -64,6 +64,30 @@ def test_pop_ref_constant_is_tuned_for_ease():
     assert POP_REF == 500.0
 
 
+def test_similar_excludes_self_and_ranks_cf_neighbor_first(tiny_catalog):
+    rec = Recommender(tiny_catalog)
+    sims = rec.similar("b0", n=3)  # b0 is CF-warm (pop 3000) -> CF drives 'similar'
+    ids = [s.book["id"] for s in sims]
+    assert "b0" not in ids
+    assert ids[0] == "b1"  # b1 is b0's strongest CF neighbor in the fixture
+    assert all(s.explanation.startswith("Similar to") for s in sims)
+
+
+def test_similar_unknown_book_is_empty(tiny_catalog):
+    assert Recommender(tiny_catalog).similar("does-not-exist") == []
+
+
+def test_recommendations_carry_explanations(tiny_catalog):
+    picks = Recommender(tiny_catalog).recommend({"b0": "like"}, {}, n=3)
+    assert all(s.explanation for s in picks)
+    assert any("Dune" in s.explanation for s in picks)  # cites the liked title
+
+
+def test_cold_user_gets_neutral_explanation(tiny_catalog):
+    picks = Recommender(tiny_catalog).recommend({}, {}, n=2)
+    assert picks[0].explanation == "A popular pick to get you started"
+
+
 def _clustered_catalog() -> Catalog:
     """Two near-identical cluster-A books + one cluster-B book (distinct authors)."""
     books = [

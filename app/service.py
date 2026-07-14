@@ -12,6 +12,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from .library import LibraryEntry
 from .recommender import Recommender, Scored
 from .search import Match, TitleIndex
@@ -49,10 +51,13 @@ class BookRecommenderService:
         db_path: Path | None = None,
         check_same_thread: bool = True,
     ):
+        self.data_dir = data_dir
         self.catalog = Catalog.load(data_dir)
         self.recommender = Recommender(self.catalog)
         self.titles = TitleIndex(self.catalog)
         self.store = SwipeStore(db_path or data_dir / "app.db", check_same_thread=check_same_thread)
+        self._encoder_cache: object | None = None
+        self._encoder_loaded = False
 
     # ---- users --------------------------------------------------------------
 
@@ -98,6 +103,42 @@ class BookRecommenderService:
 
     def search_titles(self, query: str, k: int = 5) -> list[Match]:
         return self.titles.search(query, k)
+
+    def semantic_search(self, query: str, k: int = 8) -> list[dict]:
+        """Search the catalog by meaning ("books about grief and the sea").
+
+        Encodes the query into the same space as the book embeddings and returns
+        the nearest books. Needs the embedding encoder (torch); returns [] if it
+        isn't available (e.g. the numpy-only serving image), so callers can fall
+        back to title search.
+        """
+        enc = self._encoder()
+        if enc is None or not query.strip():
+            return []
+        qv = enc.encode([query], normalize_embeddings=True)[0].astype(np.float32)
+        order = np.argsort(-(self.catalog.emb @ qv))[:k]
+        return [self.catalog.books[int(i)] for i in order]
+
+    def similar_books(self, book_id: str, n: int = 8) -> list[Scored]:
+        """'More like this' for a given book (content + CF neighbours)."""
+        return self.recommender.similar(book_id, n)
+
+    def _encoder(self):
+        """Lazily load the embedding encoder (the co-read one if built, else base).
+
+        Cached; returns None if sentence-transformers/torch isn't installed.
+        """
+        if not self._encoder_loaded:
+            self._encoder_loaded = True
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                coread = self.data_dir / "coread-encoder"
+                model = str(coread) if coread.exists() else "BAAI/bge-small-en-v1.5"
+                self._encoder_cache = SentenceTransformer(model)
+            except Exception:
+                self._encoder_cache = None
+        return self._encoder_cache
 
     def seed(self, user_id: str, titles: Sequence[str]) -> SeedResult:
         """Resolve typed titles to catalog books and record them as likes."""
