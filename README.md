@@ -76,10 +76,11 @@ headings (Fraunces) over an Inter body, pill buttons.
 
 | Module | Role |
 |--------|------|
-| `app/store.py`       | `Catalog` (books + embeddings + **sparse top-k CF matrix** + popularity + metadata filters, one aligned index) and `SwipeStore` (users/swipes/profiles in SQLite). Split so the store can move to Postgres+pgvector without touching the rest. |
-| `app/recommender.py` | Adaptive hybrid: Rocchio profile, content + CF scores, **per-item weight by rating count** (`cf_weight`), MMR diversity, exploit/explore card selection, `surprise()`, author dedup. |
+| `app/store.py`       | `Catalog` (books + fp16 embeddings + **sparse top-k CF matrix** + popularity + **vectorized metadata filters**, one aligned index) and `SwipeStore` (users/swipes/profiles in SQLite). Split so the store can move to Postgres+pgvector without touching the rest. |
+| `app/recommender.py` | Adaptive hybrid: Rocchio profile, content + CF scores, **per-item weight by rating count** (`cf_weight`); list assembly with **MMR + genre calibration**, exploit/explore, `surprise()`, `similar()` ("more like this"), and per-pick explanations. |
 | `app/search.py`      | Fuzzy title resolution for the seed step. |
-| `app/service.py`     | `BookRecommenderService`: users/profiles, `seed`, `next_cards`, `swipe`, `recommendations`, `surprises`, `wishlist`, filters. The seam a UI/HTTP layer sits on. |
+| `app/library.py`     | Parse an uploaded reading list (CSV/TSV/TXT/XLSX) into `(title, author)` entries. |
+| `app/service.py`     | `BookRecommenderService`: users/profiles, `seed`, `next_cards`, `swipe`, `recommendations`, `surprises`, `wishlist`, `semantic_search`, `similar_books`, `import_library`, filters. The seam a UI/HTTP layer sits on. |
 | `app/demo.py`        | Scripted end-to-end session (seed → recommend → swipe → adapt → filter). |
 
 ### The adaptive hybrid
