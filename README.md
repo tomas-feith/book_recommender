@@ -311,7 +311,7 @@ part of both curves; `mmr_lambda` is a natural "focused ↔ eclectic" control.
 | `eval/embedders.py` | `HashingEmbedder` (numpy) + `SentenceTransformerEmbedder` (optional). |
 | `eval/profiles.py`  | `mean` and `rocchio` taste-vector builders. |
 | `eval/metrics.py`   | Recall@K, NDCG@K, MRR. |
-| `eval/run.py` / `compare_paradigms.py` / `cold_start.py` / `diversity.py` | The scoreboards (ranking paradigms, cold-start, and the relevance↔diversity frontier). |
+| `eval/run.py` / `compare_paradigms.py` / `cold_start.py` / `diversity.py` / `learned_rerank.py` | The scoreboards (ranking paradigms, cold-start, diversity frontier, and the learned-reranker check). |
 
 ## Development
 
@@ -366,6 +366,12 @@ database-shaped. Nothing in `recommender.py` / `service.py` moves.
   from a handful of likes overfit, and no real user's tastes were separable enough
   to help (see git history). A per-user classifier with more signal may still be
   worth trying; the harness will say if it helped.
+- **A learned reranker.** A logistic ranker trained on real goodbooks interactions
+  (over content, CF, cf_weight, popularity, and interactions) was measured against
+  the hand-tuned blend (`eval.learned_rerank`) and **matched but did not beat it**
+  (0.354 vs 0.353) — it essentially rediscovered the formula. The upside needs
+  *real swipe labels* and richer features (recency, skips), so the harness is in
+  place but nothing is wired into serving yet.
 - **Auth.** Profiles are name-only and URL-resumable; there are no passwords.
 - **Scheduling ingestion.** `fetch_new_books.py` + `refresh.py --fetch-new` are the
   live pipeline; running them on a cron/schedule (and expanding beyond Open Library

@@ -76,6 +76,8 @@ omit = [
     "eval/run.py",
     "eval/compare_paradigms.py",
     "eval/cold_start.py",
+    "eval/diversity.py",
+    "eval/learned_rerank.py",
 ]
 
 [tool.coverage.report]
