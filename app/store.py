@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
 
 import numpy as np
+from scipy import sparse
 
 from eval.data import load_books
 
@@ -33,12 +34,45 @@ DATA = ROOT / "data"
 REACTIONS = ("like", "dislike", "skip", "interested")  # skip == "haven't read"
 
 
+def save_cf(path: Path, ids: Sequence[str], sim: sparse.csr_matrix, pop: np.ndarray) -> None:
+    """Persist a sparse top-k CF matrix + popularity, keyed by book id.
+
+    Stored as flat CSR components (data/indices/indptr/shape) so the file needs
+    only numpy+scipy to load. Written atomically.
+    """
+    sim = sim.tocsr()
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    np.savez_compressed(
+        tmp,
+        ids=np.array(list(ids), dtype=str),
+        pop=pop.astype(np.float32),
+        sim_data=sim.data.astype(np.float32),
+        sim_indices=sim.indices.astype(np.int32),
+        sim_indptr=sim.indptr.astype(np.int64),
+        sim_shape=np.array(sim.shape, dtype=np.int64),
+    )
+    import os
+    os.replace(tmp, path)
+
+
+def load_cf(path: Path):
+    """Return (ids: list[str], sim: csr_matrix, pop: np.ndarray)."""
+    with np.load(path, allow_pickle=True) as z:
+        ids = [str(b) for b in z["ids"].tolist()]
+        pop = z["pop"].astype(np.float32)
+        sim = sparse.csr_matrix(
+            (z["sim_data"], z["sim_indices"], z["sim_indptr"]),
+            shape=tuple(z["sim_shape"]),
+        )
+    return ids, sim, pop
+
+
 @dataclass
 class Catalog:
     books: List[dict]
-    emb: np.ndarray          # (N, D) L2-normalized
-    sim: np.ndarray          # (N, N) item-item CF, 0 diagonal
-    pop: np.ndarray          # (N,) rating counts (CF-warmth proxy)
+    emb: np.ndarray                 # (N, D) L2-normalized
+    sim: sparse.csr_matrix          # (N, N) item-item CF (sparse top-k), 0 diagonal
+    pop: np.ndarray                 # (N,) rating counts (CF-warmth proxy)
     id_to_idx: Dict[str, int]
 
     @classmethod
@@ -46,18 +80,17 @@ class Catalog:
         books = load_books(data_dir / "real_books.json")
         id_to_idx = {b["id"]: i for i, b in enumerate(books)}
 
-        def aligned(npz_path: Path, key: str) -> np.ndarray:
-            npz = np.load(npz_path, allow_pickle=True)
-            pos = {str(bid): i for i, bid in enumerate(npz["ids"].tolist())}
-            perm = np.array([pos[b["id"]] for b in books])
-            arr = npz[key][perm]
-            if key == "sim":  # sim is 2-D: reorder columns too
-                arr = arr[:, perm]
-            return arr
+        def perm_for(ids: Sequence[str]) -> np.ndarray:
+            pos = {str(b): i for i, b in enumerate(ids)}
+            return np.array([pos[b["id"]] for b in books])
 
-        emb = aligned(data_dir / "real_embeddings.npz", "emb").astype(np.float32)
-        sim = aligned(data_dir / "real_cf.npz", "sim").astype(np.float32)
-        pop = aligned(data_dir / "real_cf.npz", "pop").astype(np.float32)
+        emb_npz = np.load(data_dir / "real_embeddings.npz", allow_pickle=True)
+        emb = emb_npz["emb"][perm_for(emb_npz["ids"].tolist())].astype(np.float32)
+
+        cf_ids, cf_sim, cf_pop = load_cf(data_dir / "real_cf.npz")
+        p = perm_for(cf_ids)
+        sim = cf_sim[p][:, p].tocsr()   # reorder rows AND columns to catalog order
+        pop = cf_pop[p]
         return cls(books, emb, sim, pop, id_to_idx)
 
     def __len__(self) -> int:

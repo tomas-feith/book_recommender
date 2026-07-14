@@ -75,7 +75,16 @@ class ItemItemCFRecommender(_NpzBacked):
 
     def prepare(self, books: List[dict]) -> None:
         self._align(books)
-        self.sim = self._npz["sim"][self._perm][:, self._perm]
+        # real_cf.npz now stores a sparse top-k matrix (CSR components). Eval is
+        # offline and rare, so densify it here -- keeps scoring and cold_start's
+        # row/column zeroing working on a plain 2-D array.
+        from scipy import sparse
+        z = self._npz
+        sim = sparse.csr_matrix(
+            (z["sim_data"], z["sim_indices"], z["sim_indptr"]),
+            shape=tuple(z["sim_shape"]),
+        )
+        self.sim = np.asarray(sim[self._perm][:, self._perm].todense()).astype(np.float32)
 
     def score(self, seed, dislikes, cands) -> np.ndarray:
         cands = np.asarray(cands)

@@ -114,14 +114,16 @@ def add_books(new_records: Iterable[dict], data_dir: Path = DATA, model: str | N
         print("Nothing to add -- all books already in the catalog.")
         return 0
 
+    from scipy import sparse
+    from app.store import load_cf, save_cf
+
     emb_path = data_dir / "real_embeddings.npz"
     cf_path = data_dir / "real_cf.npz"
-    # Materialize arrays and close the handles: on Windows an open NpzFile keeps
+    # Materialize arrays and close the handle: on Windows an open NpzFile keeps
     # the .npz locked, which blocks the atomic os.replace below.
     with np.load(emb_path, allow_pickle=True) as z:
         old_emb, old_emb_ids, stored_model = z["emb"], z["ids"].astype(str), str(z["model"])
-    with np.load(cf_path, allow_pickle=True) as z:
-        sim, pop, old_cf_ids = z["sim"], z["pop"], z["ids"].astype(str)
+    old_cf_ids, sim, pop = load_cf(cf_path)
 
     model = model or stored_model
     if model != stored_model:
@@ -141,16 +143,17 @@ def add_books(new_records: Iterable[dict], data_dir: Path = DATA, model: str | N
     emb = np.vstack([old_emb, new_emb]).astype(np.float32)
     emb_ids = np.concatenate([old_emb_ids, np.array(new_ids, dtype=str)])
 
-    # --- CF: grow N x N -> M x M with zero rows/cols (cold-start), pop = 0
-    n_old, k = sim.shape[0], len(to_add)
-    grown = np.zeros((n_old + k, n_old + k), dtype=np.float32)
-    grown[:n_old, :n_old] = sim
+    # --- CF: grow N x N -> M x M with empty rows/cols (cold-start), pop = 0.
+    # block_diag places the existing sparse matrix top-left; new books get no
+    # neighbors and zero popularity until refresh.py folds in real ratings.
+    k = len(to_add)
+    grown = sparse.block_diag([sim, sparse.csr_matrix((k, k))], format="csr")
     new_pop = np.concatenate([pop, np.zeros(k, dtype=np.float32)]).astype(np.float32)
-    cf_ids = np.concatenate([old_cf_ids, np.array(new_ids, dtype=str)])
+    cf_ids = list(old_cf_ids) + new_ids
 
     # --- write all three (json last: it's the source of truth for membership)
     _atomic_savez(emb_path, ids=emb_ids, emb=emb, model=np.array(model))
-    _atomic_savez(cf_path, ids=cf_ids, sim=grown, pop=new_pop)
+    save_cf(cf_path, cf_ids, grown, new_pop)
     _atomic_write_json(data_dir / "real_books.json", books)
 
     print(f"Added {k} book(s). Catalog is now {len(books)} books "

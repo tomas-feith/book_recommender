@@ -8,6 +8,7 @@ dependencies = [
     "streamlit>=1.57",
     "sentence-transformers>=3.0",
     "torch>=2.2",
+    "scipy>=1.18.0",
 ]
 
 [tool.uv]

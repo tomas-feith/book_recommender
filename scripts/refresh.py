@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))  # sibling-script imports
 
-from add_books import _atomic_savez, add_books  # noqa: E402
+from add_books import add_books  # noqa: E402
 from build_real_dataset import GB_BASE, fetch, load_csv  # noqa: E402
 from fetch_new_books import fetch_new_books  # noqa: E402
 
@@ -95,29 +95,10 @@ def _app_ratings(order: set) -> Dict[str, Dict[str, float]]:
     return by_user
 
 
-def _item_item_cf(order: List[str], by_user: Dict[str, Dict[str, float]]):
-    """Adjusted (user-mean-centered) cosine item-item similarity + popularity."""
-    idx = {bid: i for i, bid in enumerate(order)}
-    n = len(order)
-    users = [u for u, r in by_user.items() if r]
-    mat = np.zeros((n, len(users)), dtype=np.float32)
-    pop = np.zeros(n, dtype=np.float32)
-    for col, u in enumerate(users):
-        ratings = by_user[u]
-        mean = sum(ratings.values()) / len(ratings)
-        for bid, r in ratings.items():
-            row = idx[bid]
-            mat[row, col] = r - mean
-            pop[row] += 1.0
-    norms = np.linalg.norm(mat, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    mat_n = mat / norms
-    sim = (mat_n @ mat_n.T).astype(np.float32)
-    np.fill_diagonal(sim, 0.0)
-    return sim, pop, len(users)
-
-
 def rebuild_cf(data_dir: Path = DATA) -> None:
+    from app.store import save_cf
+    from cf_build import sparse_topk_cf
+
     order = _catalog_order()
     order_set = set(order)
 
@@ -134,14 +115,11 @@ def rebuild_cf(data_dir: Path = DATA) -> None:
     for uid, ratings in app.items():
         combined[f"app:{uid}"] = dict(ratings)
 
-    sim, pop, n_users = _item_item_cf(order, combined)
-    _atomic_savez(
-        data_dir / "real_cf.npz",
-        ids=np.array(order, dtype=str), sim=sim, pop=pop,
-    )
+    sim, pop = sparse_topk_cf(order, combined)
+    save_cf(data_dir / "real_cf.npz", order, sim, pop)
     n_app = sum(1 for k in combined if k.startswith("app:"))
-    print(f"Rebuilt CF ({len(order)}x{len(order)}) from {n_users} users "
-          f"({n_app} from app swipes) -> {data_dir / 'real_cf.npz'}")
+    print(f"Rebuilt sparse CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) from "
+          f"{len(combined)} users ({n_app} from app swipes) -> {data_dir / 'real_cf.npz'}")
 
 
 def main() -> None:

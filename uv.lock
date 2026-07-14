@@ -72,6 +72,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
+    { name = "scipy" },
     { name = "sentence-transformers" },
     { name = "streamlit" },
     { name = "torch" },
@@ -80,6 +81,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
+    { name = "scipy", specifier = ">=1.18.0" },
     { name = "sentence-transformers", specifier = ">=3.0" },
     { name = "streamlit", specifier = ">=1.57" },
     { name = "torch", specifier = ">=2.2" },

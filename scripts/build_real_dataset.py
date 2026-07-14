@@ -34,7 +34,7 @@ CACHE.mkdir(parents=True, exist_ok=True)
 GB_BASE = "https://raw.githubusercontent.com/zygmuntz/goodbooks-10k/master/"
 UA = {"User-Agent": "book-rec-eval/0.1"}
 
-N_BOOKS = 1000         # top books by rating count
+N_BOOKS = 10000        # top books by rating count (goodbooks-10k is ~10k total)
 MIN_RATED = 10         # a user must have rated at least this many of the subset
 MAX_RATED = 40         # ...but not be an omnivore who rated a huge share of it
 MIN_LIKES = 6          # enough positive signal to build a profile + hold out
@@ -229,39 +229,25 @@ def build_profiles(order):
 
 
 def build_cf(order, by_user, profile_uids):
-    """Item-item collaborative-filtering matrix + popularity, saved as .npz.
+    """Sparse top-k item-item CF matrix + popularity, saved as .npz.
 
     Learned ONLY from users NOT in our evaluation profiles, so the CF baseline
     never sees the held-out users' ratings -- a fair comparison against the
-    content models. Uses adjusted (user-mean-centered) cosine, the standard
-    item-item CF similarity.
+    content models. Uses adjusted (user-mean-centered) cosine, truncated to each
+    book's top neighbors (see scripts/cf_build.py) so it scales to 10k books.
     """
-    import numpy as np
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from app.store import save_cf
+    from cf_build import sparse_topk_cf
 
-    idx = {bid: i for i, bid in enumerate(order)}
-    n = len(order)
-
-    train_users = [u for u in by_user if u not in profile_uids]
-    # items x users matrix of mean-centered ratings.
-    mat = np.zeros((n, len(train_users)), dtype=np.float32)
-    pop = np.zeros(n, dtype=np.float32)
-    for col, uid in enumerate(train_users):
-        ratings = by_user[uid]
-        mean = sum(ratings.values()) / len(ratings)
-        for bid, r in ratings.items():
-            row = idx[bid]
-            mat[row, col] = r - mean
-            pop[row] += 1.0
-
-    norms = np.linalg.norm(mat, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    mat_n = mat / norms
-    sim = (mat_n @ mat_n.T).astype(np.float32)
-    np.fill_diagonal(sim, 0.0)
+    train = {u: r for u, r in by_user.items() if u not in profile_uids}
+    sim, pop = sparse_topk_cf(order, train)
 
     out = DATA / "real_cf.npz"
-    np.savez_compressed(out, ids=np.array(order), sim=sim, pop=pop)
-    print(f"Wrote CF matrix ({n}x{n}) from {len(train_users)} non-eval users -> {out}")
+    save_cf(out, order, sim, pop)
+    print(f"Wrote sparse CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) "
+          f"from {len(train)} non-eval users -> {out}")
 
 
 if __name__ == "__main__":

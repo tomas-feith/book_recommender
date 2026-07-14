@@ -89,14 +89,24 @@ class Recommender:
             return _standardize(np.log1p(self.cat.pop[cand]))
 
         content = self.cat.emb[cand] @ profile
-        cf = self.cat.sim[cand][:, list(liked)].sum(axis=1)
+        cf = self._cf_sum(cand, liked)
         if interested:
-            cf = cf + ALPHA * self.cat.sim[cand][:, list(interested)].sum(axis=1)
+            cf = cf + ALPHA * self._cf_sum(cand, interested)
         if disliked:
-            cf = cf - BETA * self.cat.sim[cand][:, list(disliked)].sum(axis=1)
+            cf = cf - BETA * self._cf_sum(cand, disliked)
 
         w = self.cf_weight[cand]
         return w * _standardize(cf) + (1.0 - w) * _standardize(content)
+
+    def _cf_sum(self, cand: np.ndarray, idxs) -> np.ndarray:
+        """Summed CF similarity from each candidate to the books in ``idxs``.
+
+        ``cat.sim`` is a sparse CSR matrix, so ``.sum(axis=1)`` yields a matrix;
+        flatten it back to a 1-D array.
+        """
+        if len(idxs) == 0:
+            return np.zeros(len(cand), dtype=np.float32)
+        return np.asarray(self.cat.sim[cand][:, list(idxs)].sum(axis=1)).ravel()
 
     def _candidate_mask(self, reactions: Dict[str, str], filters: dict) -> np.ndarray:
         mask = self.cat.filter_mask(**filters)
