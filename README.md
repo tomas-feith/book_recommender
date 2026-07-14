@@ -31,7 +31,10 @@ dependency, used to build embeddings, not to serve.
 
 `streamlit_app.py` is the front end over `app/service.py`:
 
-- **Onboard** — search titles and pick at least three books you love.
+- **Onboard** — search titles and pick at least three books you love, or **import
+  your reading list** (CSV / TSV / TXT / XLSX, e.g. a Goodreads export): we fuzzy-
+  match each title (author confirms ambiguous ones) to the catalog, seed the
+  matches as likes, and tell you which books we couldn't find.
 - **Discover** — swipe one card at a time: **Like**, **Interested** (soft yes →
   saved to your reading list), **Haven't read** (neutral, just skip), or **Pass**
   (dislike). The taste model updates immediately.

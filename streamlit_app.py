@@ -12,6 +12,7 @@ import random
 
 import streamlit as st
 
+from app.library import parse_library
 from app.service import BookRecommenderService
 from app.store import DATA
 
@@ -99,6 +100,22 @@ def add_seed(book_id: str, title: str) -> None:
 def remove_seed(book_id: str) -> None:
     svc.swipe(st.session_state.user_id, book_id, "skip")  # unlike -> mark seen
     st.session_state.seeds.pop(book_id, None)
+
+
+def import_library_cb() -> None:
+    """Parse an uploaded reading list, match it to the catalog, and seed likes."""
+    up = st.session_state.get("library_file")
+    if not up:
+        return
+    entries = parse_library(up.name, up.getvalue())
+    result = svc.import_library(st.session_state.user_id, entries)
+    for me in result.matched:
+        st.session_state.seeds[me.match.book_id] = me.match.title
+    st.session_state.import_summary = {
+        "matched": result.n_matched,
+        "total": len(entries),
+        "unmatched": [e.label() for e in result.unmatched],
+    }
 
 
 def start_swiping() -> None:
@@ -227,6 +244,24 @@ if st.session_state.phase == "onboarding":
         submitted = st.form_submit_button("Search", icon=":material/search:")
     if submitted and query:
         st.session_state.search_hits = svc.search_titles(query, k=5)
+
+    with st.expander("…or import your reading list (CSV, TSV, TXT, XLSX)"):
+        st.file_uploader(
+            "Reading list",
+            type=["csv", "tsv", "txt", "xlsx"],
+            key="library_file",
+            on_change=import_library_cb,
+            label_visibility="collapsed",
+            help="A Goodreads/StoryGraph export or any list with a title (and optional author) column.",
+        )
+        summary = st.session_state.get("import_summary")
+        if summary:
+            st.success(f"Matched {summary['matched']} of {summary['total']} books to the catalog.")
+            if summary["unmatched"]:
+                st.caption(f"Couldn't match {len(summary['unmatched'])}:")
+                st.markdown("\n".join(f"- {u}" for u in summary["unmatched"][:50]))
+                if len(summary["unmatched"]) > 50:
+                    st.caption(f"…and {len(summary['unmatched']) - 50} more.")
 
     for m in st.session_state.search_hits:
         if m.book_id in st.session_state.seeds:

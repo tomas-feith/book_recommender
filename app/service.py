@@ -7,19 +7,39 @@ and the swipe log. This is the seam a Streamlit app or an HTTP layer sits on.
 from __future__ import annotations
 
 import random
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .library import LibraryEntry
 from .recommender import Recommender, Scored
 from .search import Match, TitleIndex
 from .store import DATA, Catalog, SwipeStore
+
+_AUTHOR_TOK = re.compile(r"[a-z]{2,}")
 
 
 @dataclass
 class SeedResult:
     resolved: list[Match]
     unresolved: list[str]
+
+
+@dataclass
+class MatchedEntry:
+    entry: LibraryEntry
+    match: Match
+
+
+@dataclass
+class ImportResult:
+    matched: list[MatchedEntry]
+    unmatched: list[LibraryEntry]
+
+    @property
+    def n_matched(self) -> int:
+        return len(self.matched)
 
 
 class BookRecommenderService:
@@ -90,6 +110,47 @@ class BookRecommenderService:
             else:
                 unresolved.append(t)
         return SeedResult(resolved, unresolved)
+
+    def import_library(
+        self,
+        user_id: str,
+        entries: Sequence[LibraryEntry],
+        reaction: str = "like",
+        threshold: float = 0.55,
+    ) -> ImportResult:
+        """Match imported reading-list entries to catalog books and record them.
+
+        Each entry is fuzzy-matched by title; a matching author (any shared name
+        token) confirms a weaker title match, which trims false positives on
+        common titles. Matched books are recorded with ``reaction`` (default a
+        like, so an import seeds the taste profile). Unmatched entries are
+        returned so the UI can tell the user what we couldn't find.
+        """
+        matched: list[MatchedEntry] = []
+        unmatched: list[LibraryEntry] = []
+        recorded: set[str] = set()
+        for entry in entries:
+            m = self._resolve_entry(entry, threshold)
+            if m is None:
+                unmatched.append(entry)
+                continue
+            if m.book_id not in recorded:
+                self.store.record(user_id, m.book_id, reaction)
+                recorded.add(m.book_id)
+            matched.append(MatchedEntry(entry, m))
+        return ImportResult(matched, unmatched)
+
+    def _resolve_entry(self, entry: LibraryEntry, threshold: float) -> Match | None:
+        hits = self.titles.search(entry.title, k=5)
+        if not hits:
+            return None
+        if entry.author:
+            want = set(_AUTHOR_TOK.findall(entry.author.lower()))
+            for h in hits:
+                have = set(_AUTHOR_TOK.findall(h.author.lower()))
+                if want & have and h.score >= 0.4:  # author confirms a softer title match
+                    return h
+        return hits[0] if hits[0].score >= threshold else None
 
     # ---- swipe loop ---------------------------------------------------------
 
