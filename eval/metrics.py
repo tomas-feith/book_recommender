@@ -8,7 +8,10 @@ we ask: did the recommender rank the held-out books highly?
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Sequence
+
+import numpy as np
 
 
 def recall_at_k(ranked: Sequence, relevant: set, k: int) -> float:
@@ -38,3 +41,27 @@ def mrr(ranked: Sequence, relevant: set) -> float:
         if item in relevant:
             return 1.0 / rank
     return 0.0
+
+
+# ---- beyond-accuracy: how varied is a recommendation LIST? -------------------
+
+
+def intra_list_distance(vectors: np.ndarray) -> float:
+    """Mean pairwise cosine *distance* (1 - cos) within a list of L2-normalized
+    embeddings. Higher = more internally diverse (the classic ILD metric)."""
+    n = len(vectors)
+    if n < 2:
+        return 0.0
+    sims = np.asarray(vectors, dtype=np.float32) @ np.asarray(vectors, dtype=np.float32).T
+    iu = np.triu_indices(n, k=1)
+    return float(np.clip(1.0 - sims[iu], 0.0, 2.0).mean())
+
+
+def genre_entropy(subject_lists: Sequence[Sequence[str]]) -> float:
+    """Shannon entropy (bits) of the genre/subject distribution across a list --
+    a low value means the list piles onto one or two genres."""
+    counts = Counter(s for subs in subject_lists for s in subs)
+    total = sum(counts.values())
+    if total == 0:
+        return 0.0
+    return -sum((c / total) * math.log2(c / total) for c in counts.values())

@@ -32,8 +32,9 @@ POP_REF = 500.0  # ratings at which we ~fully trust CF; tuned for the EASE-R
 # cf_weight=0 -> pure content, protecting true cold-start.
 BETA = 0.5  # dislike weight (Rocchio + CF), < 1 because dislikes are noisier
 ALPHA = 0.6  # "interested" weight (Rocchio + CF), < 1: intent is softer than a like
-MMR_LAMBDA = 0.5  # diversity vs relevance in card selection
+MMR_LAMBDA = 0.5  # diversity vs relevance in MMR selection (1.0 = pure relevance)
 EXPLORE_FRAC = 0.25  # share of swipe cards drawn from beyond the top band
+REC_POOL_MULT = 20  # "For You": diversify within the top REC_POOL_MULT*n candidates
 
 
 def _standardize(x: np.ndarray) -> np.ndarray:
@@ -142,12 +143,19 @@ class Recommender:
     # ---- public API ---------------------------------------------------------
 
     def recommend(
-        self, reactions: dict[str, str], filters: dict, n: int = 10, per_author: int = 2
+        self,
+        reactions: dict[str, str],
+        filters: dict,
+        n: int = 10,
+        per_author: int = 2,
+        mmr_lambda: float = MMR_LAMBDA,
     ) -> list[Scored]:
-        """Best-guess recommendations (exploit), for a 'For You' list.
+        """Best-guess recommendations for a 'For You' list.
 
-        Capped at ``per_author`` books per author so a single series can't take
-        over the list.
+        Retrieves the top ``REC_POOL_MULT * n`` by relevance, then selects the
+        final ``n`` with **MMR** so the list is spread out (not ten near-identical
+        fantasy novels), capped at ``per_author`` books per author. ``mmr_lambda``
+        trades relevance (1.0) against diversity (toward 0).
         """
         liked, disliked, interested = self._split(reactions)
         cand = np.where(self._candidate_mask(reactions, filters))[0]
@@ -155,17 +163,10 @@ class Recommender:
             return []
         scores = self._scores(liked, disliked, interested, cand)
         order = cand[np.argsort(-scores)]
-
-        picks: list[int] = []
-        author_count: dict[str, int] = {}
-        for i in order:
-            author = self._primary_author(int(i))
-            if author and author_count.get(author, 0) >= per_author:
-                continue
-            picks.append(int(i))
-            author_count[author] = author_count.get(author, 0) + 1
-            if len(picks) == n:
-                break
+        pool = order[: max(REC_POOL_MULT * n, n)]
+        picks = self._mmr(
+            pool, liked, disliked, interested, n, lam=mmr_lambda, per_author=per_author
+        )
         return self._as_scored(picks, liked, disliked, interested)
 
     def next_cards(
@@ -196,7 +197,7 @@ class Recommender:
         n_exploit = n - n_explore
 
         exploit_pool = order[: max(4 * n_exploit, n_exploit)]
-        picks = self._mmr(exploit_pool, liked, disliked, interested, n_exploit, rng)
+        picks = self._mmr(exploit_pool, liked, disliked, interested, n_exploit, per_author=1)
 
         if n_explore:
             picks += self._explore(order, set(picks), n_explore, rng)
@@ -267,33 +268,51 @@ class Recommender:
         combined = 0.5 * np.arange(len(order)) + 0.5 * np.argsort(pop_rank)
         return order[np.argsort(combined)]
 
-    def _mmr(self, pool, liked, disliked, interested, k, rng) -> list[int]:
-        """Maximal-marginal-relevance select, with one-book-per-author dedup."""
+    def _mmr(
+        self,
+        pool,
+        liked,
+        disliked,
+        interested,
+        k: int,
+        lam: float = MMR_LAMBDA,
+        per_author: int = 1,
+    ) -> list[int]:
+        """Maximal-marginal-relevance select.
+
+        Greedily picks the candidate maximizing ``lam * relevance - (1 - lam) *
+        max-similarity-to-already-picked`` (``lam`` toward 0 = more diverse), with
+        at most ``per_author`` books per author so one saga can't flood the list.
+        This is the tractable approximation to "pick the k with the widest spread";
+        exact max-dispersion is NP-hard.
+        """
         pool = list(pool)
         if not pool:
             return []
         rel_scores = self._scores(liked, disliked, interested, np.array(pool))
         rel = {p: rel_scores[i] for i, p in enumerate(pool)}
         selected: list[int] = []
-        chosen_authors: set = set()
+        author_count: dict[str, int] = {}
         while pool and len(selected) < k:
             best, best_val = None, -1e18
             for p in pool:
                 author = self._primary_author(p)
-                if author and author in chosen_authors:
+                if author and author_count.get(author, 0) >= per_author:
                     continue
                 # Diversity = similarity to the most-similar already-picked book.
                 if selected:
                     div = float(np.max(self.cat.emb[p] @ self.cat.emb[selected].T))
                 else:
                     div = 0.0
-                val = MMR_LAMBDA * rel[p] - (1 - MMR_LAMBDA) * div
+                val = lam * rel[p] - (1 - lam) * div
                 if val > best_val:
                     best, best_val = p, val
-            if best is None:  # only same-author books left; relax dedup
+            if best is None:  # every author cap hit; relax and take the most relevant
                 best = max(pool, key=lambda p: rel[p])
             selected.append(best)
-            chosen_authors.add(self._primary_author(best))
+            author = self._primary_author(best)
+            if author:
+                author_count[author] = author_count.get(author, 0) + 1
             pool.remove(best)
         return selected
 

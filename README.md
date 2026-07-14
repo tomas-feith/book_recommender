@@ -38,8 +38,8 @@ dependency, used to build embeddings, not to serve.
 - **Discover** — swipe one card at a time: **Like**, **Interested** (soft yes →
   saved to your reading list), **Haven't read** (neutral, just skip), or **Pass**
   (dislike). The taste model updates immediately.
-- **For you** — a live grid of best-guess recommendations; **Save** one to your
-  reading list or dismiss it as **Not for me** to refine your taste.
+- **For you** — a live grid of best-guess recommendations, **diversified with MMR**
+  so it isn't ten near-identical books (see [Diversity](#diversity-the-relevancediversity-frontier)); **Save** one to your reading list or dismiss it as **Not for me** to refine your taste.
 - **Surprise me** — wildcards: books *far* from your usual taste that readers
   like you still rate highly (see [Surprise mode](#surprise-mode)).
 - **Reading list** — everything you marked **Interested**, in one place.
@@ -262,6 +262,34 @@ but **narrow**: it only helps the content channel, i.e. onboarding and brand-new
 catalog additions; warm users are CF-dominated and unaffected. Serving uses the
 fine-tuned encoder's vectors — same 384-dim, same numpy-only serving path.
 
+### Diversity: the relevance↔diversity frontier
+
+You don't want ten near-identical fantasy novels (or all seven Harry Potters). The
+serving lists select with **MMR** — retrieve the top `REC_POOL_MULT·n` by relevance,
+then greedily pick the ones that maximize `λ·relevance − (1−λ)·max-similarity-to-
+already-picked`, capped per author so one saga can't flood the list. (Exact
+"maximize the spread of the chosen set" is NP-hard; greedy MMR is the standard
+tractable approximation. A single-author series is collapsed by the author cap;
+near-duplicates across authors by the similarity penalty.)
+
+`eval.diversity` sweeps λ over the real profiles and measures Recall@10 against
+three beyond-accuracy metrics — **intra-list distance** (ILD), **genre entropy**,
+and catalog **coverage**:
+
+| `mmr_lambda` | Recall@10 | ILD | genre-H | coverage |
+|:---:|:---:|:---:|:---:|:---:|
+| 1.0 (pure relevance) | 0.341 | 0.500 | 4.09 | 0.052 |
+| 0.7 | **0.342** | 0.506 | 4.11 | 0.052 |
+| **0.5 (default)** | 0.338 | 0.514 | 4.14 | 0.053 |
+| 0.3 | 0.333 | 0.533 | 4.22 | 0.055 |
+
+**Diversity is nearly free here:** going from pure relevance to λ=0.3 costs ~2%
+Recall for +7% ILD and higher genre spread/coverage, and λ=0.7 is a small free
+lunch. The default `MMR_LAMBDA=0.5` sits on the cheap part of the curve; the knob
+is a natural "focused ↔ eclectic" control. (For *multi-taste* coverage — showing
+your sci-fi *and* your romance in proportion — calibrated recommendations are the
+logical next step; noted, not yet built.)
+
 ### Eval harness layout
 
 | File | Role |
@@ -271,7 +299,7 @@ fine-tuned encoder's vectors — same 384-dim, same numpy-only serving path.
 | `eval/embedders.py` | `HashingEmbedder` (numpy) + `SentenceTransformerEmbedder` (optional). |
 | `eval/profiles.py`  | `mean` and `rocchio` taste-vector builders. |
 | `eval/metrics.py`   | Recall@K, NDCG@K, MRR. |
-| `eval/run.py` / `compare_paradigms.py` / `cold_start.py` | The scoreboards. |
+| `eval/run.py` / `compare_paradigms.py` / `cold_start.py` / `diversity.py` | The scoreboards (ranking paradigms, cold-start, and the relevance↔diversity frontier). |
 
 ## Development
 
