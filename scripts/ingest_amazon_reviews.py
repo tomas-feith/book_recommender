@@ -27,7 +27,6 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 
@@ -35,8 +34,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from eval.data import book_to_text            # noqa: E402
-from ingest_goodreads_ucsd import stream_jsonl_gz, _to_int  # noqa: E402  (shared helpers)
+from ingest_goodreads_ucsd import _to_int, stream_jsonl_gz  # noqa: E402  (shared helpers)
+
+from eval.data import book_to_text  # noqa: E402
 
 DATA = ROOT / "data"
 MIN_RATED_PER_USER = 3
@@ -44,10 +44,10 @@ MAX_USERS = 200_000
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 
 
-def select_top_books(meta_path: Path, top_n: int) -> List[dict]:
+def select_top_books(meta_path: Path, top_n: int) -> list[dict]:
     """Keep the ``top_n`` books with the most ratings (by ``rating_number``)."""
-    heap: List[tuple] = []
-    for i, raw in enumerate(stream_jsonl_gz(meta_path)):
+    heap: list[tuple] = []
+    for raw in stream_jsonl_gz(meta_path):
         if not raw.get("title") or not raw.get("parent_asin"):
             continue
         rc = _to_int(raw.get("rating_number"))
@@ -97,8 +97,8 @@ def to_record(raw: dict) -> dict:
     }
 
 
-def build_interactions(reviews_path: Path, keep: set) -> Dict[str, Dict[str, float]]:
-    by_user: Dict[str, Dict[str, float]] = defaultdict(dict)
+def build_interactions(reviews_path: Path, keep: set) -> dict[str, dict[str, float]]:
+    by_user: dict[str, dict[str, float]] = defaultdict(dict)
     for row in stream_jsonl_gz(reviews_path):
         bid = "az:" + str(row.get("parent_asin"))
         rating = _to_int(row.get("rating"))
@@ -112,8 +112,9 @@ def build_interactions(reviews_path: Path, keep: set) -> Dict[str, Dict[str, flo
 
 
 def ingest(meta_path, reviews_path, top_n, data_dir=DATA):
-    from app.store import save_cf
     from cf_build import sparse_topk_cf
+
+    from app.store import save_cf
     from eval.embedders import SentenceTransformerEmbedder
 
     print(f"Selecting top {top_n} books by rating count...")
@@ -135,13 +136,19 @@ def ingest(meta_path, reviews_path, top_n, data_dir=DATA):
 
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "real_books.json").write_text(
-        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8")
+        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     np.savez_compressed(
         data_dir / "real_embeddings.npz",
-        ids=np.array(order, dtype=str), emb=emb.astype(np.float32), model=np.array(model))
+        ids=np.array(order, dtype=str),
+        emb=emb.astype(np.float32),
+        model=np.array(model),
+    )
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
-    print(f"Done. {len(books)} books, sparse CF ({sim.shape[0]}x{sim.shape[1]}, "
-          f"{sim.nnz} nnz) from {len(by_user)} users -> {data_dir}")
+    print(
+        f"Done. {len(books)} books, sparse CF ({sim.shape[0]}x{sim.shape[1]}, "
+        f"{sim.nnz} nnz) from {len(by_user)} users -> {data_dir}"
+    )
 
 
 def main() -> None:

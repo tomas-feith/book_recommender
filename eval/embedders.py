@@ -19,7 +19,6 @@ Two are provided:
 from __future__ import annotations
 
 import re
-from typing import List
 
 import numpy as np
 
@@ -41,10 +40,10 @@ class HashingEmbedder:
         self.dim = dim
         self.seed = seed
 
-    def _tokenize(self, text: str) -> List[str]:
+    def _tokenize(self, text: str) -> list[str]:
         return _TOKEN_RE.findall(text.lower())
 
-    def encode(self, texts: List[str]) -> np.ndarray:
+    def encode(self, texts: list[str]) -> np.ndarray:
         out = np.zeros((len(texts), self.dim), dtype=np.float32)
         for row, text in enumerate(texts):
             for tok in self._tokenize(text):
@@ -65,7 +64,7 @@ class SentenceTransformerEmbedder:
         self.name = model_name
         self.model = SentenceTransformer(model_name, device=device)
 
-    def encode(self, texts: List[str]) -> np.ndarray:
+    def encode(self, texts: list[str]) -> np.ndarray:
         vecs = self.model.encode(
             texts,
             batch_size=32,

@@ -19,13 +19,11 @@ import argparse
 import json
 import os
 import re
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -33,8 +31,16 @@ API = "https://www.googleapis.com/books/v1/volumes"
 UA = {"User-Agent": "book-rec/0.1 (catalog source)"}
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 
-DEFAULT_SUBJECTS = ("fiction", "science fiction", "fantasy", "mystery",
-                    "romance", "history", "biography", "poetry")
+DEFAULT_SUBJECTS = (
+    "fiction",
+    "science fiction",
+    "fantasy",
+    "mystery",
+    "romance",
+    "history",
+    "biography",
+    "poetry",
+)
 
 
 def _load_dotenv() -> None:
@@ -48,16 +54,25 @@ def _load_dotenv() -> None:
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def _search(subject: str, start: int, key: str, retries: int = 3) -> List[dict]:
-    params = urllib.parse.urlencode({
-        "q": f'subject:"{subject}"',
-        "startIndex": start, "maxResults": 40,
-        "langRestrict": "en", "country": "US", "orderBy": "relevance", "key": key,
-    })
+def _search(subject: str, start: int, key: str, retries: int = 3) -> list[dict]:
+    params = urllib.parse.urlencode(
+        {
+            "q": f'subject:"{subject}"',
+            "startIndex": start,
+            "maxResults": 40,
+            "langRestrict": "en",
+            "country": "US",
+            "orderBy": "relevance",
+            "key": key,
+        }
+    )
     for attempt in range(retries):
         try:
-            data = json.load(urllib.request.urlopen(
-                urllib.request.Request(f"{API}?{params}", headers=UA), timeout=20))
+            data = json.load(
+                urllib.request.urlopen(
+                    urllib.request.Request(f"{API}?{params}", headers=UA), timeout=20
+                )
+            )
             return data.get("items") or []
         except urllib.error.HTTPError as e:
             if e.code == 503 and attempt < retries - 1:
@@ -66,13 +81,13 @@ def _search(subject: str, start: int, key: str, retries: int = 3) -> List[dict]:
             raise SystemExit(
                 f"Google Books error {e.code} for subject {subject!r}. "
                 "429 = quota (need a key); 503 = search backend outage (retry later)."
-            )
+            ) from e
         except Exception:
             return []
     return []
 
 
-def to_record(vol: dict) -> Optional[dict]:
+def to_record(vol: dict) -> dict | None:
     info = vol.get("volumeInfo", {})
     if not info.get("title") or not vol.get("id"):
         return None
@@ -94,20 +109,23 @@ def to_record(vol: dict) -> Optional[dict]:
 def _existing(data_dir: Path):
     books = json.loads((data_dir / "real_books.json").read_text(encoding="utf-8"))
     ids = {b["id"] for b in books}
-    titles = {f"{b['title'].strip().lower()}|{(b.get('author') or '').split(',')[0].strip().lower()}"
-              for b in books}
+    titles = {
+        f"{b['title'].strip().lower()}|{(b.get('author') or '').split(',')[0].strip().lower()}"
+        for b in books
+    }
     return ids, titles
 
 
-def fetch_google_books(subjects=DEFAULT_SUBJECTS, want: int = 40,
-                       api_key: Optional[str] = None, data_dir: Path = DATA) -> List[dict]:
+def fetch_google_books(
+    subjects=DEFAULT_SUBJECTS, want: int = 40, api_key: str | None = None, data_dir: Path = DATA
+) -> list[dict]:
     _load_dotenv()
     api_key = api_key or os.environ.get("GOOGLE_BOOKS_API_KEY")
     if not api_key:
         raise SystemExit("No API key. Set GOOGLE_BOOKS_API_KEY in .env or pass --api-key.")
 
     known_ids, known_titles = _existing(data_dir)
-    out: List[dict] = []
+    out: list[dict] = []
     seen: set = set()
     for subject in subjects:
         start = 0
@@ -119,7 +137,9 @@ def fetch_google_books(subjects=DEFAULT_SUBJECTS, want: int = 40,
                 rec = to_record(vol)
                 if not rec:
                     continue
-                tkey = f"{rec['title'].strip().lower()}|{rec['author'].split(',')[0].strip().lower()}"
+                tkey = (
+                    f"{rec['title'].strip().lower()}|{rec['author'].split(',')[0].strip().lower()}"
+                )
                 if rec["id"] in known_ids or rec["id"] in seen or tkey in known_titles:
                     continue
                 if not rec["description"]:
@@ -142,7 +162,9 @@ def main() -> None:
     ap.add_argument("--subjects", help="Comma-separated subjects (default: broad set).")
     ap.add_argument("--api-key")
     args = ap.parse_args()
-    subjects = tuple(s.strip() for s in args.subjects.split(",")) if args.subjects else DEFAULT_SUBJECTS
+    subjects = (
+        tuple(s.strip() for s in args.subjects.split(",")) if args.subjects else DEFAULT_SUBJECTS
+    )
     records = fetch_google_books(subjects=subjects, want=args.want, api_key=args.api_key)
     Path(args.out).write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Fetched {len(records)} new book(s) -> {args.out}")

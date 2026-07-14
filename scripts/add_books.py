@@ -33,8 +33,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List
 
 import numpy as np
 
@@ -58,6 +58,7 @@ DEFAULTS = {
 
 # ---- artifact I/O ------------------------------------------------------------
 
+
 def _atomic_write_json(path: Path, obj) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -71,11 +72,12 @@ def _atomic_savez(path: Path, **arrays) -> None:
     os.replace(tmp, path)
 
 
-def _load_books(data_dir: Path) -> List[dict]:
+def _load_books(data_dir: Path) -> list[dict]:
     return json.loads((data_dir / "real_books.json").read_text(encoding="utf-8"))
 
 
 # ---- helpers -----------------------------------------------------------------
+
 
 def _normalize(record: dict) -> dict:
     if not record.get("id") or not record.get("title"):
@@ -86,13 +88,14 @@ def _normalize(record: dict) -> dict:
     return out
 
 
-def _embed(texts: List[str], model: str) -> np.ndarray:
+def _embed(texts: list[str], model: str) -> np.ndarray:
     from eval.embedders import SentenceTransformerEmbedder  # lazy: needs torch
 
     return SentenceTransformerEmbedder(model).encode(texts)
 
 
 # ---- core --------------------------------------------------------------------
+
 
 def add_books(new_records: Iterable[dict], data_dir: Path = DATA, model: str | None = None) -> int:
     """Append genuinely-new books to the catalog's three artifacts.
@@ -115,6 +118,7 @@ def add_books(new_records: Iterable[dict], data_dir: Path = DATA, model: str | N
         return 0
 
     from scipy import sparse
+
     from app.store import load_cf, save_cf
 
     emb_path = data_dir / "real_embeddings.npz"
@@ -156,12 +160,14 @@ def add_books(new_records: Iterable[dict], data_dir: Path = DATA, model: str | N
     save_cf(cf_path, cf_ids, grown, new_pop)
     _atomic_write_json(data_dir / "real_books.json", books)
 
-    print(f"Added {k} book(s). Catalog is now {len(books)} books "
-          f"(new books start CF-cold: pop=0, content-ranked).")
+    print(
+        f"Added {k} book(s). Catalog is now {len(books)} books "
+        f"(new books start CF-cold: pop=0, content-ranked)."
+    )
     return k
 
 
-def main(argv: List[str]) -> None:
+def main(argv: list[str]) -> None:
     if len(argv) != 1:
         raise SystemExit("usage: add_books.py <new_books.json>")
     records = json.loads(Path(argv[0]).read_text(encoding="utf-8"))

@@ -28,7 +28,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -51,25 +50,28 @@ class BackendUnavailable(RuntimeError):
     """Google Books search returned 503 backendFailed on every retry (Google-side)."""
 
 
-def _query(title: str, author: str, api_key: Optional[str] = None, retries: int = 3) -> Optional[dict]:
-    q = f'intitle:{title}'
+def _query(title: str, author: str, api_key: str | None = None, retries: int = 3) -> dict | None:
+    q = f"intitle:{title}"
     if author:
-        q += f' inauthor:{author.split(",")[0]}'
+        q += f" inauthor:{author.split(',')[0]}"
     params = {"q": q, "maxResults": 1, "country": "US"}
     if api_key:
         params["key"] = api_key
     url = f"{API}?{urllib.parse.urlencode(params)}"
     for attempt in range(retries):
         try:
-            return _pick(json.load(urllib.request.urlopen(
-                urllib.request.Request(url, headers=UA), timeout=15)))
+            return _pick(
+                json.load(
+                    urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=15)
+                )
+            )
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 raise QuotaExceeded(
                     "Google Books returned 429 (quota exceeded). The unauthenticated "
                     "quota is a shared pool; set GOOGLE_BOOKS_API_KEY or pass --api-key "
                     "with a free key from console.cloud.google.com."
-                )
+                ) from e
             if e.code == 503 and attempt < retries - 1:
                 time.sleep(2 * (attempt + 1))  # backendFailed is often transient
                 continue
@@ -77,14 +79,14 @@ def _query(title: str, author: str, api_key: Optional[str] = None, retries: int 
                 raise BackendUnavailable(
                     "Google Books search returned 503 (backendFailed) on every retry. "
                     "This is a Google-side outage of the search endpoint; try again later."
-                )
+                ) from e
             return None
         except Exception:
             return None
     return None
 
 
-def _pick(data: dict) -> Optional[dict]:
+def _pick(data: dict) -> dict | None:
     items = data.get("items") or []
     return items[0].get("volumeInfo", {}) if items else None
 
@@ -101,8 +103,9 @@ def _load_dotenv() -> None:
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def enrich(data_dir: Path = DATA, limit: int = 200, re_embed: bool = True,
-           api_key: Optional[str] = None) -> int:
+def enrich(
+    data_dir: Path = DATA, limit: int = 200, re_embed: bool = True, api_key: str | None = None
+) -> int:
     _load_dotenv()
     api_key = api_key or os.environ.get("GOOGLE_BOOKS_API_KEY")
     books = json.loads((data_dir / "real_books.json").read_text(encoding="utf-8"))
@@ -110,8 +113,10 @@ def enrich(data_dir: Path = DATA, limit: int = 200, re_embed: bool = True,
     CACHE.parent.mkdir(parents=True, exist_ok=True)
 
     todo = [b for b in books if not (b.get("description") or "").strip()]
-    print(f"{len(todo)} books missing a description; enriching up to {limit}"
-          f"{' (with API key)' if api_key else ' (no API key -- likely 429)'}...")
+    print(
+        f"{len(todo)} books missing a description; enriching up to {limit}"
+        f"{' (with API key)' if api_key else ' (no API key -- likely 429)'}..."
+    )
 
     changed = {}  # book_id -> book (for re-embedding)
     calls = 0
@@ -147,7 +152,8 @@ def enrich(data_dir: Path = DATA, limit: int = 200, re_embed: bool = True,
         return 0
 
     (data_dir / "real_books.json").write_text(
-        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8")
+        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     if re_embed:
         _reembed(data_dir, changed)
@@ -166,13 +172,15 @@ def _reembed(data_dir: Path, changed: dict) -> None:
     ids_to_embed = [k for k in changed if k in pos]
     print(f"Re-embedding {len(ids_to_embed)} changed books with {model}...")
     vecs = SentenceTransformerEmbedder(model).encode(
-        [book_to_text(changed[k]) for k in ids_to_embed])
-    for k, v in zip(ids_to_embed, vecs):
+        [book_to_text(changed[k]) for k in ids_to_embed]
+    )
+    for k, v in zip(ids_to_embed, vecs, strict=True):
         emb[pos[k]] = v
 
     tmp = emb_path.with_name(emb_path.stem + ".tmp.npz")
     np.savez_compressed(tmp, ids=ids, emb=emb, model=np.array(model))
     import os
+
     os.replace(tmp, emb_path)
     print(f"Updated {len(ids_to_embed)} embedding rows -> {emb_path}")
 

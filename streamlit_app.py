@@ -9,7 +9,6 @@ Run:  streamlit run streamlit_app.py
 from __future__ import annotations
 
 import random
-from pathlib import Path
 
 import streamlit as st
 
@@ -23,6 +22,7 @@ MIN_SEEDS = 3
 
 
 # --- engine (shared across sessions) ------------------------------------------
+
 
 @st.cache_resource
 def get_service() -> BookRecommenderService:
@@ -52,12 +52,13 @@ opts = filter_options()
 # resumes the same profile instead of silently minting a throwaway one. Swipes
 # are keyed by this id in SQLite, so nothing is lost across sessions.
 
+
 def bind_user(uid: str) -> None:
     """Point this session at ``uid`` and rebuild its state from the DB."""
     st.session_state.user_id = uid
     st.query_params["uid"] = uid
     seeds = svc.liked_titles(uid)
-    st.session_state.seeds = seeds            # book_id -> title, from stored likes
+    st.session_state.seeds = seeds  # book_id -> title, from stored likes
     st.session_state.phase = "swiping" if len(seeds) >= MIN_SEEDS else "onboarding"
     st.session_state.search_hits = []
     st.session_state.queue = []
@@ -71,6 +72,7 @@ st.session_state.setdefault("filters_sig", None)
 
 
 # --- callbacks ----------------------------------------------------------------
+
 
 def save_profile() -> None:
     name = (st.session_state.get("new_profile_name") or "").strip()
@@ -87,6 +89,7 @@ def switch_profile() -> None:
     ids = {p["name"]: p["id"] for p in svc.list_profiles()}
     if pick in ids and ids[pick] != st.session_state.user_id:
         bind_user(ids[pick])
+
 
 def add_seed(book_id: str, title: str) -> None:
     svc.swipe(st.session_state.user_id, book_id, "like")
@@ -128,6 +131,7 @@ def current_filters() -> dict:
 
 # --- shared render helpers ----------------------------------------------------
 
+
 def genre_badges(book: dict, n: int = 3) -> str:
     colors = ["blue", "violet", "green", "orange"]
     subs = book.get("subjects", [])[:n]
@@ -154,28 +158,40 @@ with st.sidebar:
         st.caption(f":material/account_circle: Signed in as **{current_name}**")
     else:
         st.caption("Unsaved profile — name it to keep it and switch back later.")
-        with st.form("save_profile", border=False, clear_on_submit=True):
-            with st.container(horizontal=True, vertical_alignment="bottom"):
-                st.text_input("Profile name", key="new_profile_name",
-                              placeholder="e.g. Alex", label_visibility="collapsed")
-                st.form_submit_button("Save", icon=":material/save:",
-                                      on_click=save_profile)
+        with (
+            st.form("save_profile", border=False, clear_on_submit=True),
+            st.container(horizontal=True, vertical_alignment="bottom"),
+        ):
+            st.text_input(
+                "Profile name",
+                key="new_profile_name",
+                placeholder="e.g. Alex",
+                label_visibility="collapsed",
+            )
+            st.form_submit_button("Save", icon=":material/save:", on_click=save_profile)
 
     profiles = svc.list_profiles()
     if profiles:
         names = [p["name"] for p in profiles]
-        st.selectbox("Switch profile", ["Switch profile…"] + names,
-                     key="profile_switch", on_change=switch_profile,
-                     label_visibility="collapsed")
+        st.selectbox(
+            "Switch profile",
+            ["Switch profile…", *names],
+            key="profile_switch",
+            on_change=switch_profile,
+            label_visibility="collapsed",
+        )
     st.button("New profile", icon=":material/person_add:", on_click=new_profile)
 
     st.subheader("Filters", anchor=False)
-    st.multiselect("Language", opts["languages"], key="f_langs",
-                   placeholder="Any language")
-    st.multiselect("Genres", opts["genres"], key="f_genres",
-                   placeholder="Any genre")
-    st.slider("Publication year", opts["year_min"], opts["year_max"],
-              value=(opts["year_min"], opts["year_max"]), key="f_years")
+    st.multiselect("Language", opts["languages"], key="f_langs", placeholder="Any language")
+    st.multiselect("Genres", opts["genres"], key="f_genres", placeholder="Any genre")
+    st.slider(
+        "Publication year",
+        opts["year_min"],
+        opts["year_max"],
+        value=(opts["year_min"], opts["year_max"]),
+        key="f_years",
+    )
 
     counts = svc.profile_summary(st.session_state.user_id)
     st.subheader("Your taste so far", anchor=False)
@@ -199,14 +215,16 @@ if sig != st.session_state.filters_sig:
 
 if st.session_state.phase == "onboarding":
     st.title("Name a few books you love", anchor=False)
-    st.caption("We'll find your next favourites from there. Add at least "
-               f"{MIN_SEEDS}.")
+    st.caption(f"We'll find your next favourites from there. Add at least {MIN_SEEDS}.")
 
-    with st.form("seed_search", border=False, clear_on_submit=True):
-        with st.container(horizontal=True, vertical_alignment="bottom"):
-            query = st.text_input("Search a title", placeholder="e.g. The Hobbit",
-                                  label_visibility="collapsed")
-            submitted = st.form_submit_button("Search", icon=":material/search:")
+    with (
+        st.form("seed_search", border=False, clear_on_submit=True),
+        st.container(horizontal=True, vertical_alignment="bottom"),
+    ):
+        query = st.text_input(
+            "Search a title", placeholder="e.g. The Hobbit", label_visibility="collapsed"
+        )
+        submitted = st.form_submit_button("Search", icon=":material/search:")
     if submitted and query:
         st.session_state.search_hits = svc.search_titles(query, k=5)
 
@@ -215,20 +233,31 @@ if st.session_state.phase == "onboarding":
             continue
         with st.container(horizontal=True, vertical_alignment="center"):
             st.markdown(f"**{m.title}** — {m.author}")
-            st.button("Add", icon=":material/add:", key=f"add_{m.book_id}",
-                      on_click=add_seed, args=(m.book_id, m.title))
+            st.button(
+                "Add",
+                icon=":material/add:",
+                key=f"add_{m.book_id}",
+                on_click=add_seed,
+                args=(m.book_id, m.title),
+            )
 
     if st.session_state.seeds:
         st.subheader("Your picks", anchor=False)
         for bid, title in list(st.session_state.seeds.items()):
             with st.container(horizontal=True, vertical_alignment="center"):
                 st.markdown(f":material/favorite: {title}")
-                st.button("Remove", icon=":material/close:", key=f"rm_{bid}",
-                          on_click=remove_seed, args=(bid,))
+                st.button(
+                    "Remove",
+                    icon=":material/close:",
+                    key=f"rm_{bid}",
+                    on_click=remove_seed,
+                    args=(bid,),
+                )
 
     st.button(
         f"Start swiping ({len(st.session_state.seeds)}/{MIN_SEEDS})",
-        icon=":material/swipe:", type="primary",
+        icon=":material/swipe:",
+        type="primary",
         disabled=len(st.session_state.seeds) < MIN_SEEDS,
         on_click=start_swiping,
     )
@@ -245,13 +274,17 @@ else:
     with discover:
         if not st.session_state.queue:
             st.session_state.queue = svc.next_cards(
-                st.session_state.user_id, n=CARDS_PER_FETCH,
-                rng=random.Random(), **current_filters(),
+                st.session_state.user_id,
+                n=CARDS_PER_FETCH,
+                rng=random.Random(),
+                **current_filters(),
             )
 
         if not st.session_state.queue:
-            st.info("No more books match your filters — loosen them in the sidebar.",
-                    icon=":material/filter_alt_off:")
+            st.info(
+                "No more books match your filters — loosen them in the sidebar.",
+                icon=":material/filter_alt_off:",
+            )
         else:
             card = st.session_state.queue[0]
             book = card.book
@@ -270,87 +303,128 @@ else:
                     st.caption(f":material/recommend: Suggested from {driver}")
 
             with st.container(horizontal=True, horizontal_alignment="center"):
-                st.button("Pass", icon=":material/thumb_down:",
-                          on_click=do_swipe, args=(book["id"], "dislike"))
-                st.button("Haven't read", icon=":material/help:",
-                          on_click=do_swipe, args=(book["id"], "skip"))
-                st.button("Interested", icon=":material/bookmark_add:",
-                          on_click=do_swipe, args=(book["id"], "interested"))
-                st.button("Like", icon=":material/thumb_up:", type="primary",
-                          on_click=do_swipe, args=(book["id"], "like"))
-            st.caption(f"{len(st.session_state.queue)} cards queued · "
-                       f"{svc.profile_summary(st.session_state.user_id)['like']} liked so far")
+                st.button(
+                    "Pass",
+                    icon=":material/thumb_down:",
+                    on_click=do_swipe,
+                    args=(book["id"], "dislike"),
+                )
+                st.button(
+                    "Haven't read",
+                    icon=":material/help:",
+                    on_click=do_swipe,
+                    args=(book["id"], "skip"),
+                )
+                st.button(
+                    "Interested",
+                    icon=":material/bookmark_add:",
+                    on_click=do_swipe,
+                    args=(book["id"], "interested"),
+                )
+                st.button(
+                    "Like",
+                    icon=":material/thumb_up:",
+                    type="primary",
+                    on_click=do_swipe,
+                    args=(book["id"], "like"),
+                )
+            st.caption(
+                f"{len(st.session_state.queue)} cards queued · "
+                f"{svc.profile_summary(st.session_state.user_id)['like']} liked so far"
+            )
 
     with for_you:
         recs = svc.recommendations(st.session_state.user_id, n=12, **current_filters())
         if not recs:
             st.caption("Like a few books to unlock recommendations.")
         else:
-            st.caption("Save a book to your reading list, or dismiss it to refine "
-                       "your taste — the list refreshes as you go.")
+            st.caption(
+                "Save a book to your reading list, or dismiss it to refine "
+                "your taste — the list refreshes as you go."
+            )
             cols = st.columns(3)
             for i, r in enumerate(recs):
-                with cols[i % 3]:
-                    with st.container(border=True):
-                        cover(st, r.book)
-                        st.markdown(f"**{r.book['title'][:44]}**")
-                        st.caption(r.book.get("author", ""))
-                        if genre_badges(r.book, n=2):
-                            st.markdown(genre_badges(r.book, n=2))
-                        with st.container(horizontal=True):
-                            st.button("Save", icon=":material/bookmark_add:",
-                                      key=f"fy_save_{r.book['id']}", on_click=react,
-                                      args=(r.book["id"], "interested"))
-                            st.button("Not for me", icon=":material/close:",
-                                      key=f"fy_no_{r.book['id']}", on_click=react,
-                                      args=(r.book["id"], "dislike"))
+                with cols[i % 3], st.container(border=True):
+                    cover(st, r.book)
+                    st.markdown(f"**{r.book['title'][:44]}**")
+                    st.caption(r.book.get("author", ""))
+                    if genre_badges(r.book, n=2):
+                        st.markdown(genre_badges(r.book, n=2))
+                    with st.container(horizontal=True):
+                        st.button(
+                            "Save",
+                            icon=":material/bookmark_add:",
+                            key=f"fy_save_{r.book['id']}",
+                            on_click=react,
+                            args=(r.book["id"], "interested"),
+                        )
+                        st.button(
+                            "Not for me",
+                            icon=":material/close:",
+                            key=f"fy_no_{r.book['id']}",
+                            on_click=react,
+                            args=(r.book["id"], "dislike"),
+                        )
 
     with surprise_tab:
         surprises = svc.surprises(st.session_state.user_id, n=9, **current_filters())
         if not surprises:
-            st.caption("Like a few books first — then we'll find reads that are "
-                       "**nothing like** your usual taste but that readers like "
-                       "you still love.")
+            st.caption(
+                "Like a few books first — then we'll find reads that are "
+                "**nothing like** your usual taste but that readers like "
+                "you still love."
+            )
         else:
-            st.caption("Wildcards: far from what you usually read, but readers "
-                       "with your taste rate them highly. Save one or dismiss it.")
+            st.caption(
+                "Wildcards: far from what you usually read, but readers "
+                "with your taste rate them highly. Save one or dismiss it."
+            )
             cols = st.columns(3)
             for i, s in enumerate(surprises):
-                with cols[i % 3]:
-                    with st.container(border=True):
-                        cover(st, s.book)
-                        st.markdown(f"**{s.book['title'][:44]}**")
-                        st.caption(s.book.get("author", ""))
-                        if genre_badges(s.book, n=2):
-                            st.markdown(genre_badges(s.book, n=2))
-                        st.caption(
-                            f":material/auto_awesome: {int(round(s.novelty * 100))}% "
-                            "outside your usual — CF-driven"
+                with cols[i % 3], st.container(border=True):
+                    cover(st, s.book)
+                    st.markdown(f"**{s.book['title'][:44]}**")
+                    st.caption(s.book.get("author", ""))
+                    if genre_badges(s.book, n=2):
+                        st.markdown(genre_badges(s.book, n=2))
+                    st.caption(
+                        f":material/auto_awesome: {round(s.novelty * 100)}% "
+                        "outside your usual — CF-driven"
+                    )
+                    with st.container(horizontal=True):
+                        st.button(
+                            "Save",
+                            icon=":material/bookmark_add:",
+                            key=f"sp_save_{s.book['id']}",
+                            on_click=react,
+                            args=(s.book["id"], "interested"),
                         )
-                        with st.container(horizontal=True):
-                            st.button("Save", icon=":material/bookmark_add:",
-                                      key=f"sp_save_{s.book['id']}", on_click=react,
-                                      args=(s.book["id"], "interested"))
-                            st.button("Not for me", icon=":material/close:",
-                                      key=f"sp_no_{s.book['id']}", on_click=react,
-                                      args=(s.book["id"], "dislike"))
+                        st.button(
+                            "Not for me",
+                            icon=":material/close:",
+                            key=f"sp_no_{s.book['id']}",
+                            on_click=react,
+                            args=(s.book["id"], "dislike"),
+                        )
 
     with reading:
         wish = svc.wishlist(st.session_state.user_id)
         if not wish:
-            st.caption("Books you mark **Interested** land here — your saved "
-                       "reading list.")
+            st.caption("Books you mark **Interested** land here — your saved reading list.")
         else:
             st.caption("Your saved books. Remove one to take it off the list.")
             cols = st.columns(3)
             for i, book in enumerate(wish):
-                with cols[i % 3]:
-                    with st.container(border=True):
-                        cover(st, book)
-                        st.markdown(f"**{book['title'][:44]}**")
-                        st.caption(book.get("author", ""))
-                        if genre_badges(book, n=2):
-                            st.markdown(genre_badges(book, n=2))
-                        st.button("Remove", icon=":material/close:",
-                                  key=f"wl_rm_{book['id']}", on_click=react,
-                                  args=(book["id"], "skip"))
+                with cols[i % 3], st.container(border=True):
+                    cover(st, book)
+                    st.markdown(f"**{book['title'][:44]}**")
+                    st.caption(book.get("author", ""))
+                    if genre_badges(book, n=2):
+                        st.markdown(genre_badges(book, n=2))
+                    st.button(
+                        "Remove",
+                        icon=":material/close:",
+                        key=f"wl_rm_{book['id']}",
+                        on_click=react,
+                        args=(book["id"], "skip"),
+                    )

@@ -7,9 +7,9 @@ and the swipe log. This is the seam a Streamlit app or an HTTP layer sits on.
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
 
 from .recommender import Recommender, Scored
 from .search import Match, TitleIndex
@@ -18,15 +18,15 @@ from .store import DATA, Catalog, SwipeStore
 
 @dataclass
 class SeedResult:
-    resolved: List[Match]
-    unresolved: List[str]
+    resolved: list[Match]
+    unresolved: list[str]
 
 
 class BookRecommenderService:
     def __init__(
         self,
         data_dir: Path = DATA,
-        db_path: Optional[Path] = None,
+        db_path: Path | None = None,
         check_same_thread: bool = True,
     ):
         self.catalog = Catalog.load(data_dir)
@@ -48,10 +48,10 @@ class BookRecommenderService:
     def profile_name(self, user_id: str) -> str:
         return self.store.user_name(user_id)
 
-    def list_profiles(self) -> List[dict]:
+    def list_profiles(self) -> list[dict]:
         return self.store.named_users()
 
-    def liked_titles(self, user_id: str) -> Dict[str, str]:
+    def liked_titles(self, user_id: str) -> dict[str, str]:
         """Map of book_id -> title for the user's likes (to rebuild onboarding seeds)."""
         out = {}
         for bid, r in self.store.reactions(user_id).items():
@@ -59,13 +59,13 @@ class BookRecommenderService:
                 out[bid] = self.catalog.books[self.catalog.idx(bid)]["title"]
         return out
 
-    def profile_summary(self, user_id: str) -> Dict[str, int]:
+    def profile_summary(self, user_id: str) -> dict[str, int]:
         counts = {"like": 0, "dislike": 0, "skip": 0, "interested": 0}
         for r in self.store.reactions(user_id).values():
             counts[r] = counts.get(r, 0) + 1
         return counts
 
-    def wishlist(self, user_id: str) -> List[dict]:
+    def wishlist(self, user_id: str) -> list[dict]:
         """Books the user marked 'interested' — their saved reading list."""
         reactions = self.store.reactions(user_id)
         return [
@@ -76,7 +76,7 @@ class BookRecommenderService:
 
     # ---- onboarding ---------------------------------------------------------
 
-    def search_titles(self, query: str, k: int = 5) -> List[Match]:
+    def search_titles(self, query: str, k: int = 5) -> list[Match]:
         return self.titles.search(query, k)
 
     def seed(self, user_id: str, titles: Sequence[str]) -> SeedResult:
@@ -94,8 +94,8 @@ class BookRecommenderService:
     # ---- swipe loop ---------------------------------------------------------
 
     def next_cards(
-        self, user_id: str, n: int = 10, rng: Optional[random.Random] = None, **filters
-    ) -> List[Scored]:
+        self, user_id: str, n: int = 10, rng: random.Random | None = None, **filters
+    ) -> list[Scored]:
         return self.recommender.next_cards(
             self.store.reactions(user_id), _clean_filters(filters), n=n, rng=rng
         )
@@ -103,17 +103,17 @@ class BookRecommenderService:
     def swipe(self, user_id: str, book_id: str, reaction: str) -> None:
         self.store.record(user_id, book_id, reaction)
 
-    def recommendations(self, user_id: str, n: int = 10, **filters) -> List[Scored]:
+    def recommendations(self, user_id: str, n: int = 10, **filters) -> list[Scored]:
         return self.recommender.recommend(
             self.store.reactions(user_id), _clean_filters(filters), n=n
         )
 
-    def surprises(self, user_id: str, n: int = 10, **filters) -> List[Scored]:
+    def surprises(self, user_id: str, n: int = 10, **filters) -> list[Scored]:
         return self.recommender.surprise(
             self.store.reactions(user_id), _clean_filters(filters), n=n
         )
 
-    def genres(self) -> List[str]:
+    def genres(self) -> list[str]:
         return self.catalog.all_genres()
 
     def close(self) -> None:

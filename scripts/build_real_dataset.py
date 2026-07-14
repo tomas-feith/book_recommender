@@ -34,21 +34,50 @@ CACHE.mkdir(parents=True, exist_ok=True)
 GB_BASE = "https://raw.githubusercontent.com/zygmuntz/goodbooks-10k/master/"
 UA = {"User-Agent": "book-rec-eval/0.1"}
 
-N_BOOKS = 10000        # top books by rating count (goodbooks-10k is ~10k total)
-MIN_RATED = 10         # a user must have rated at least this many of the subset
-MAX_RATED = 40         # ...but not be an omnivore who rated a huge share of it
-MIN_LIKES = 6          # enough positive signal to build a profile + hold out
-MAX_LIKES = 25         # exclude users who "like" nearly everything
-MAX_USERS = 120        # cap profiles
-OL_WORKERS = 12        # threads for Open Library enrichment
+N_BOOKS = 10000  # top books by rating count (goodbooks-10k is ~10k total)
+MIN_RATED = 10  # a user must have rated at least this many of the subset
+MAX_RATED = 40  # ...but not be an omnivore who rated a huge share of it
+MIN_LIKES = 6  # enough positive signal to build a profile + hold out
+MAX_LIKES = 25  # exclude users who "like" nearly everything
+MAX_USERS = 120  # cap profiles
+OL_WORKERS = 12  # threads for Open Library enrichment
 
 # Goodreads shelves that are not genres -- excluded from a book's subjects.
 NON_GENRE = (
-    "to-read", "currently-reading", "read", "favorites", "favourites", "owned",
-    "own", "books-i-own", "i-own", "wish", "library", "kindle", "ebook", "e-book",
-    "audio", "audiobook", "series", "re-read", "reread", "default", "my-books",
-    "to-buy", "buy", "shelf", "have", "want", "unfinished", "dnf", "abandoned",
-    "all-time", "book-club", "not-read", "maybe", "tbr",
+    "to-read",
+    "currently-reading",
+    "read",
+    "favorites",
+    "favourites",
+    "owned",
+    "own",
+    "books-i-own",
+    "i-own",
+    "wish",
+    "library",
+    "kindle",
+    "ebook",
+    "e-book",
+    "audio",
+    "audiobook",
+    "series",
+    "re-read",
+    "reread",
+    "default",
+    "my-books",
+    "to-buy",
+    "buy",
+    "shelf",
+    "have",
+    "want",
+    "unfinished",
+    "dnf",
+    "abandoned",
+    "all-time",
+    "book-club",
+    "not-read",
+    "maybe",
+    "tbr",
 )
 
 
@@ -84,7 +113,9 @@ def ol_description(isbn: str) -> str | None:
     if not desc and ed.get("works"):
         try:
             wk_url = "https://openlibrary.org" + ed["works"][0]["key"] + ".json"
-            wk = json.load(urllib.request.urlopen(urllib.request.Request(wk_url, headers=UA), timeout=12))
+            wk = json.load(
+                urllib.request.urlopen(urllib.request.Request(wk_url, headers=UA), timeout=12)
+            )
             desc = wk.get("description")
         except Exception:
             desc = None
@@ -102,8 +133,9 @@ def enrich_descriptions(books):
     cache = json.loads(cache_file.read_text()) if cache_file.exists() else {}
 
     todo = [b for b in books if b["isbn10"] and b["isbn10"] not in cache]
-    print(f"Enriching {len(todo)} descriptions from Open Library "
-          f"({len(books) - len(todo)} cached)...")
+    print(
+        f"Enriching {len(todo)} descriptions from Open Library ({len(books) - len(todo)} cached)..."
+    )
 
     def work(isbn):
         return isbn, ol_description(isbn)
@@ -167,16 +199,20 @@ def build_books():
             year = int(float(year))
         except ValueError:
             year = None
-        books.append({
-            "id": r["book_id"],
-            "title": r.get("original_title") or r.get("title") or "",
-            "author": r.get("authors", ""),
-            "subjects": subjects_for(r["goodreads_book_id"]),
-            "language": lang_map.get(r.get("language_code", ""), r.get("language_code") or "en"),
-            "year": year,
-            "image": r.get("image_url", ""),
-            "isbn10": pad_isbn10(r.get("isbn", "")),
-        })
+        books.append(
+            {
+                "id": r["book_id"],
+                "title": r.get("original_title") or r.get("title") or "",
+                "author": r.get("authors", ""),
+                "subjects": subjects_for(r["goodreads_book_id"]),
+                "language": lang_map.get(
+                    r.get("language_code", ""), r.get("language_code") or "en"
+                ),
+                "year": year,
+                "image": r.get("image_url", ""),
+                "isbn10": pad_isbn10(r.get("isbn", "")),
+            }
+        )
 
     enrich_descriptions(books)
     for b in books:
@@ -221,8 +257,10 @@ def build_profiles(order):
     out.write_text(json.dumps(profiles, indent=2), encoding="utf-8")
     n_dis = sum(1 for p in profiles if p["dislikes"])
     avg_likes = sum(len(p["likes"]) for p in profiles) / max(len(profiles), 1)
-    print(f"Wrote {len(profiles)} profiles -> {out} "
-          f"({n_dis} have dislikes, avg {avg_likes:.1f} likes/user)")
+    print(
+        f"Wrote {len(profiles)} profiles -> {out} "
+        f"({n_dis} have dislikes, avg {avg_likes:.1f} likes/user)"
+    )
 
     build_cf(order, by_user, {p["user"].removeprefix("gr_") for p in profiles})
     return profiles
@@ -238,17 +276,21 @@ def build_cf(order, by_user, profile_uids):
     adjusted-cosine KNN builder while keeping the same sparse serving format.
     """
     import sys
+
     sys.path.insert(0, str(ROOT))
-    from app.store import save_cf
     from cf_build import ease_cf
+
+    from app.store import save_cf
 
     train = {u: r for u, r in by_user.items() if u not in profile_uids}
     sim, pop = ease_cf(order, train)
 
     out = DATA / "real_cf.npz"
     save_cf(out, order, sim, pop)
-    print(f"Wrote EASE-R CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) "
-          f"from {len(train)} non-eval users -> {out}")
+    print(
+        f"Wrote EASE-R CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) "
+        f"from {len(train)} non-eval users -> {out}"
+    )
 
 
 if __name__ == "__main__":

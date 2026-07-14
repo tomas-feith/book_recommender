@@ -17,12 +17,11 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 
 from .data import load_books, load_profiles
-from .embedders import HashingEmbedder, SentenceTransformerEmbedder
+from .embedders import SentenceTransformerEmbedder
 from .metrics import mrr, ndcg_at_k, recall_at_k
 from .recommenders import (
     EmbeddingRecommender,
@@ -32,8 +31,8 @@ from .recommenders import (
 )
 
 DATA = Path(__file__).resolve().parent.parent / "data"
-COLD_FRAC = 0.40       # share of catalog treated as newly-added (no ratings)
-K_HOLDOUT = 2          # cold liked books hidden per trial
+COLD_FRAC = 0.40  # share of catalog treated as newly-added (no ratings)
+K_HOLDOUT = 2  # cold liked books hidden per trial
 K_EVAL = 10
 SEEDS = list(range(5))
 
@@ -56,7 +55,7 @@ def apply_cold(rec, cold_idx: np.ndarray) -> None:
         apply_cold(rec.cf, cold_idx)
 
 
-def evaluate_cold(rec, books, profiles, cold: np.ndarray) -> Dict[str, float]:
+def evaluate_cold(rec, books, profiles, cold: np.ndarray) -> dict[str, float]:
     id_to_idx = {b["id"]: i for i, b in enumerate(books)}
     rec.prepare(books)
     apply_cold(rec, np.where(cold)[0])
@@ -67,7 +66,6 @@ def evaluate_cold(rec, books, profiles, cold: np.ndarray) -> Dict[str, float]:
         likes = [id_to_idx[b] for b in prof["likes"] if b in id_to_idx]
         dislikes = [id_to_idx[b] for b in prof.get("dislikes", []) if b in id_to_idx]
         cold_likes = [i for i in likes if cold[i]]
-        warm_likes = [i for i in likes if not cold[i]]
         # Need cold books to hide, and enough remaining signal to seed a profile.
         if len(cold_likes) < K_HOLDOUT or len(likes) - K_HOLDOUT < 3:
             continue
@@ -99,7 +97,7 @@ def main() -> None:
     )
     cf = ItemItemCFRecommender(cf_npz)
 
-    recommenders = [
+    recommenders: list = [
         PopularityRecommender(cf_npz),
         content,
         cf,

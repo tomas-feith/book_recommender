@@ -1,0 +1,51 @@
+# Pre-commit hooks. Install once with:  uv run --no-sync pre-commit install
+#                                        uv run --no-sync pre-commit install --hook-type pre-push
+#
+# ruff / mypy / pytest run through `uv run` so they use the exact versions pinned
+# in uv.lock -- the same ones CI uses -- instead of a separately-pinned mirror.
+
+# Generated data artifacts and caches are not source -- never rewrite them.
+exclude: '^(data/|\.cache/|\.venv)'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]   # keep the big .npz / data artifacts out of git
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint)
+        entry: uv run --no-sync ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff (format)
+        entry: uv run --no-sync ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: mypy
+        name: mypy
+        entry: uv run --no-sync mypy
+        language: system
+        types: [python]
+        pass_filenames: false          # mypy uses the [tool.mypy] files setting
+
+      - id: pytest
+        name: pytest
+        entry: uv run --no-sync python -m pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]             # run the suite on push; keep commits fast

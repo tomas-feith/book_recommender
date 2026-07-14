@@ -40,8 +40,8 @@ import heapq
 import json
 import sys
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
@@ -56,8 +56,8 @@ DATA = ROOT / "data"
 LANG_MAP = {"eng": "en", "en-US": "en", "en-GB": "en", "en-CA": "en", "": "en"}
 
 # Swipe/rating scale is 1-5; UCSD ratings are already 0-5 (0 == no rating).
-MIN_RATED_PER_USER = 3        # users with too little signal add noise to CF
-MAX_USERS = 200_000           # cap CF training users to bound memory
+MIN_RATED_PER_USER = 3  # users with too little signal add noise to CF
+MAX_USERS = 200_000  # cap CF training users to bound memory
 
 
 def stream_jsonl_gz(path: Path) -> Iterable[dict]:
@@ -71,13 +71,14 @@ def stream_jsonl_gz(path: Path) -> Iterable[dict]:
 
 # ---- metadata ----------------------------------------------------------------
 
-def load_authors(path: Optional[Path]) -> Dict[str, str]:
+
+def load_authors(path: Path | None) -> dict[str, str]:
     if not path:
         return {}
     return {str(a["author_id"]): a.get("name", "") for a in stream_jsonl_gz(path)}
 
 
-def load_genres(path: Optional[Path], keep: Optional[set] = None) -> Dict[str, List[str]]:
+def load_genres(path: Path | None, keep: set | None = None) -> dict[str, list[str]]:
     """book_id -> ranked genre list (UCSD genres file is {book_id, genres:{g:count}}).
 
     The genres file covers ALL ~2.3M books; pass ``keep`` (a set of raw book_ids)
@@ -85,7 +86,7 @@ def load_genres(path: Optional[Path], keep: Optional[set] = None) -> Dict[str, L
     """
     if not path:
         return {}
-    out: Dict[str, List[str]] = {}
+    out: dict[str, list[str]] = {}
     for row in stream_jsonl_gz(path):
         bid = str(row["book_id"])
         if keep is not None and bid not in keep:
@@ -102,9 +103,9 @@ def _to_int(x, default=0) -> int:
         return default
 
 
-def select_top_books(books_path: Path, top_n: int) -> List[dict]:
+def select_top_books(books_path: Path, top_n: int) -> list[dict]:
     """Stream the books file, keep the ``top_n`` with the most ratings (min-heap)."""
-    heap: List[tuple] = []  # (ratings_count, book_id, raw)
+    heap: list[tuple] = []  # (ratings_count, book_id, raw)
     for i, raw in enumerate(stream_jsonl_gz(books_path)):
         rc = _to_int(raw.get("ratings_count"))
         if not raw.get("title"):
@@ -117,14 +118,13 @@ def select_top_books(books_path: Path, top_n: int) -> List[dict]:
     return [raw for _, _, raw in sorted(heap, key=lambda t: -t[0])]
 
 
-def to_record(raw: dict, authors: Dict[str, str], genres: Dict[str, List[str]]) -> dict:
+def to_record(raw: dict, authors: dict[str, str], genres: dict[str, list[str]]) -> dict:
     bid = str(raw["book_id"])
     author_names = [authors.get(str(a.get("author_id")), "") for a in raw.get("authors", [])]
     author_names = [a for a in author_names if a][:2]
     subs = genres.get(bid) or [
-        s["name"].lower() for s in sorted(
-            raw.get("popular_shelves", []), key=lambda s: -_to_int(s.get("count"))
-        )[:5]
+        s["name"].lower()
+        for s in sorted(raw.get("popular_shelves", []), key=lambda s: -_to_int(s.get("count")))[:5]
     ]
     year = _to_int(raw.get("publication_year")) or None
     return {
@@ -141,13 +141,14 @@ def to_record(raw: dict, authors: Dict[str, str], genres: Dict[str, List[str]]) 
 
 # ---- interactions ------------------------------------------------------------
 
-def build_interactions(path: Path, keep: set) -> Dict[str, Dict[str, float]]:
+
+def build_interactions(path: Path, keep: set) -> dict[str, dict[str, float]]:
     """Stream interactions, keeping rated ones for selected books.
 
     Returns {user_id: {gr_book_id: rating}}. Users with < MIN_RATED_PER_USER
     ratings are dropped; the set is capped at MAX_USERS.
     """
-    by_user: Dict[str, Dict[str, float]] = defaultdict(dict)
+    by_user: dict[str, dict[str, float]] = defaultdict(dict)
     for row in stream_jsonl_gz(path):
         bid = "gr:" + str(row.get("book_id"))
         rating = _to_int(row.get("rating"))
@@ -163,9 +164,11 @@ def build_interactions(path: Path, keep: set) -> Dict[str, Dict[str, float]]:
 
 # ---- driver ------------------------------------------------------------------
 
+
 def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data_dir=DATA):
-    from app.store import save_cf
     from cf_build import sparse_topk_cf
+
+    from app.store import save_cf
     from eval.embedders import SentenceTransformerEmbedder
 
     print(f"Selecting top {top_n} books by rating count...")
@@ -176,8 +179,10 @@ def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data
     books = [to_record(r, authors, genres) for r in raw_books]
     order = [b["id"] for b in books]
     keep = set(order)
-    print(f"  selected {len(books)} books "
-          f"({sum(1 for b in books if b['description'])} with descriptions)")
+    print(
+        f"  selected {len(books)} books "
+        f"({sum(1 for b in books if b['description'])} with descriptions)"
+    )
 
     print("Streaming interactions (the big one)...")
     by_user = build_interactions(interactions_path, keep)
@@ -192,13 +197,19 @@ def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data
 
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "real_books.json").write_text(
-        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8")
+        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     np.savez_compressed(
         data_dir / "real_embeddings.npz",
-        ids=np.array(order, dtype=str), emb=emb.astype(np.float32), model=np.array(model))
+        ids=np.array(order, dtype=str),
+        emb=emb.astype(np.float32),
+        model=np.array(model),
+    )
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
-    print(f"Done. Wrote {len(books)} books, sparse CF ({sim.shape[0]}x{sim.shape[1]}, "
-          f"{sim.nnz} nnz) from {len(by_user)} users -> {data_dir}")
+    print(
+        f"Done. Wrote {len(books)} books, sparse CF ({sim.shape[0]}x{sim.shape[1]}, "
+        f"{sim.nnz} nnz) from {len(by_user)} users -> {data_dir}"
+    )
 
 
 def main() -> None:

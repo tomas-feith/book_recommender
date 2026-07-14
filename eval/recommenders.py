@@ -17,8 +17,8 @@ popularity, and hybrid approaches compete on the identical hold-out scoreboard.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Sequence
 
 import numpy as np
 
@@ -37,13 +37,16 @@ class EmbeddingRecommender:
         self.strategy = strategy
         self.text_mode = text_mode
         self.name = f"content:{getattr(embedder, 'name', '?')}/{strategy}"
-        self._cat = None
+        self._cat: np.ndarray | None = None
 
-    def prepare(self, books: List[dict]) -> None:
+    def prepare(self, books: list[dict]) -> None:
         texts = [book_to_text(b, mode=self.text_mode) for b in books]
         self._cat = self.embedder.encode(texts)
 
-    def score(self, seed: Sequence[int], dislikes: Sequence[int], cands: Sequence[int]) -> np.ndarray:
+    def score(
+        self, seed: Sequence[int], dislikes: Sequence[int], cands: Sequence[int]
+    ) -> np.ndarray:
+        assert self._cat is not None, "call prepare() before score()"
         profile = build_profile(
             self._cat[list(seed)],
             self._cat[list(dislikes)] if len(dislikes) else None,
@@ -51,7 +54,7 @@ class EmbeddingRecommender:
         )
         return self._cat[np.asarray(cands)] @ profile
 
-    def rank(self, seed, dislikes, cands) -> List[int]:
+    def rank(self, seed, dislikes, cands) -> list[int]:
         return _rank_from_score(self.score(seed, dislikes, cands), cands)
 
 
@@ -61,7 +64,7 @@ class _NpzBacked:
     def __init__(self, npz_path: Path):
         self._npz = np.load(npz_path, allow_pickle=True)
 
-    def _align(self, books: List[dict]):
+    def _align(self, books: list[dict]):
         npz_pos = {str(bid): i for i, bid in enumerate(self._npz["ids"].tolist())}
         self._perm = np.array([npz_pos[b["id"]] for b in books])
 
@@ -73,12 +76,13 @@ class ItemItemCFRecommender(_NpzBacked):
         super().__init__(npz_path)
         self.beta = beta
 
-    def prepare(self, books: List[dict]) -> None:
+    def prepare(self, books: list[dict]) -> None:
         self._align(books)
         # real_cf.npz now stores a sparse top-k matrix (CSR components). Eval is
         # offline and rare, so densify it here -- keeps scoring and cold_start's
         # row/column zeroing working on a plain 2-D array.
         from scipy import sparse
+
         z = self._npz
         sim = sparse.csr_matrix(
             (z["sim_data"], z["sim_indices"], z["sim_indptr"]),
@@ -95,21 +99,21 @@ class ItemItemCFRecommender(_NpzBacked):
             s = s - self.beta * self.sim[:, list(dislikes)].sum(axis=1)
         return s[cands]
 
-    def rank(self, seed, dislikes, cands) -> List[int]:
+    def rank(self, seed, dislikes, cands) -> list[int]:
         return _rank_from_score(self.score(seed, dislikes, cands), cands)
 
 
 class PopularityRecommender(_NpzBacked):
     name = "popularity"
 
-    def prepare(self, books: List[dict]) -> None:
+    def prepare(self, books: list[dict]) -> None:
         self._align(books)
         self.pop = self._npz["pop"][self._perm]
 
     def score(self, seed, dislikes, cands) -> np.ndarray:
         return self.pop[np.asarray(cands)]
 
-    def rank(self, seed, dislikes, cands) -> List[int]:
+    def rank(self, seed, dislikes, cands) -> list[int]:
         return _rank_from_score(self.score(seed, dislikes, cands), cands)
 
 
@@ -120,7 +124,7 @@ class HybridRecommender:
         self.w_cf = w_cf
         self.name = f"hybrid:{w_cf:.0%}cf"
 
-    def prepare(self, books: List[dict]) -> None:
+    def prepare(self, books: list[dict]) -> None:
         self.content.prepare(books)
         self.cf.prepare(books)
 
@@ -129,10 +133,10 @@ class HybridRecommender:
         f = _standardize(self.cf.score(seed, dislikes, cands))
         return self.w_cf * f + (1.0 - self.w_cf) * c
 
-    def rank(self, seed, dislikes, cands) -> List[int]:
+    def rank(self, seed, dislikes, cands) -> list[int]:
         return _rank_from_score(self.score(seed, dislikes, cands), cands)
 
 
-def _rank_from_score(scores: np.ndarray, cands: Sequence[int]) -> List[int]:
-    cands = np.asarray(cands)
-    return cands[np.argsort(-scores)].tolist()
+def _rank_from_score(scores: np.ndarray, cands: Sequence[int]) -> list[int]:
+    cand_arr = np.asarray(cands)
+    return cand_arr[np.argsort(-scores)].tolist()

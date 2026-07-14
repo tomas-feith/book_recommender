@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
-from typing import List, NamedTuple
+from typing import NamedTuple
 
 from .store import Catalog
 
@@ -34,13 +34,13 @@ class TitleIndex:
         self._norm_titles = [_norm(b["title"]) for b in catalog.books]
         self._title_tokens = [set(t.split()) for t in self._norm_titles]
 
-    def search(self, query: str, k: int = 5) -> List[Match]:
+    def search(self, query: str, k: int = 5) -> list[Match]:
         q = _norm(query)
         if not q:
             return []
         q_tokens = set(q.split())
         results = []
-        for i, (nt, toks) in enumerate(zip(self._norm_titles, self._title_tokens)):
+        for i, (nt, toks) in enumerate(zip(self._norm_titles, self._title_tokens, strict=True)):
             if not nt:
                 continue
             ratio = SequenceMatcher(None, q, nt).ratio()

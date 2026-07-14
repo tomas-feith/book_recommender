@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 
@@ -33,7 +32,7 @@ K_EVAL = 10
 SEEDS = list(range(5))
 
 
-def cached_content(books: List[dict], data_dir: Path = DATA):
+def cached_content(books: list[dict], data_dir: Path = DATA):
     """A content recommender backed by the precomputed serving embeddings.
 
     ``data/real_embeddings.npz`` already holds the bge-small vectors for the whole
@@ -49,13 +48,13 @@ def cached_content(books: List[dict], data_dir: Path = DATA):
         return None
     emb = z["emb"].astype(np.float32)[[pos[b["id"]] for b in books]]
     rec = EmbeddingRecommender(embedder=None, strategy="rocchio")
-    rec.name = f"content:{str(z['model'])}/rocchio (cached)"
+    rec.name = f"content:{z['model']!s}/rocchio (cached)"
     rec._cat = emb
-    rec.prepare = lambda _books: None       # already prepared; don't re-embed
+    rec.prepare = lambda _books: None  # type: ignore[method-assign,assignment]  # already prepared
     return rec
 
 
-def evaluate(rec, books, profiles) -> Dict[str, float]:
+def evaluate(rec, books, profiles) -> dict[str, float]:
     id_to_idx = {b["id"]: i for i, b in enumerate(books)}
     rec.prepare(books)
 

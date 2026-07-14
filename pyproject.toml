@@ -18,5 +18,49 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "mypy>=2.3.0",
+    "pre-commit>=4.6.0",
+    "pytest>=9.1.1",
+    "ruff>=0.15.21",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["app", "eval"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", ".venv39", "data", ".cache"]
+
+[tool.ruff.lint]
+# Pragmatic set: pyflakes/pycodestyle errors, import sorting, pyupgrade,
+# bugbear, comprehensions, simplify, and ruff's own rules.
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",    # line length is handled by the formatter, not the linter
+    "B008",    # function calls in argument defaults (Path(...) defaults are fine here)
+    "SIM108",  # ternary-vs-if is a readability judgement call
+    "RUF002",  # ambiguous unicode in docstrings -- the prose deliberately uses em-dashes/arrows
+    "RUF003",  # ...likewise in comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+# Scoped to the serving/eval library. Scripts are operational glue over heavy,
+# untyped third-party deps (torch, sentence-transformers, network I/O).
+files = ["app", "eval"]
+python_version = "3.12"
+ignore_missing_imports = true   # scipy / sentence_transformers / streamlit / torch ship no stubs
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

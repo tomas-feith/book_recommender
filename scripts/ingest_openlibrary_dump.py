@@ -28,8 +28,8 @@ import gzip
 import json
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 from scipy import sparse
@@ -63,7 +63,7 @@ def _text(val) -> str:
     return (val or "").strip() if isinstance(val, (str, type(None))) else ""
 
 
-def _author_keys(work: dict) -> List[str]:
+def _author_keys(work: dict) -> list[str]:
     out = []
     for a in work.get("authors", []):
         key = (a.get("author") or {}).get("key") if isinstance(a, dict) else None
@@ -72,9 +72,9 @@ def _author_keys(work: dict) -> List[str]:
     return out
 
 
-def select_works(works_path: Path, top_n: int) -> List[dict]:
+def select_works(works_path: Path, top_n: int) -> list[dict]:
     """First ``top_n`` works that have a title AND a description."""
-    out: List[dict] = []
+    out: list[dict] = []
     for work in stream_dump(works_path):
         if work.get("title") and _text(work.get("description")):
             out.append(work)
@@ -83,10 +83,10 @@ def select_works(works_path: Path, top_n: int) -> List[dict]:
     return out
 
 
-def load_author_names(authors_path: Optional[Path], needed: set) -> Dict[str, str]:
+def load_author_names(authors_path: Path | None, needed: set) -> dict[str, str]:
     if not authors_path or not needed:
         return {}
-    names: Dict[str, str] = {}
+    names: dict[str, str] = {}
     for a in stream_dump(authors_path):
         key = a.get("key")
         if key in needed:
@@ -96,7 +96,7 @@ def load_author_names(authors_path: Optional[Path], needed: set) -> Dict[str, st
     return names
 
 
-def to_record(work: dict, authors: Dict[str, str]) -> dict:
+def to_record(work: dict, authors: dict[str, str]) -> dict:
     key = work["key"]  # "/works/OL...W"
     author_names = [authors.get(k, "") for k in _author_keys(work)]
     author_names = [a for a in author_names if a][:2]
@@ -139,13 +139,19 @@ def ingest(works_path, authors_path, top_n, data_dir=DATA):
 
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "real_books.json").write_text(
-        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8")
+        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     np.savez_compressed(
         data_dir / "real_embeddings.npz",
-        ids=np.array(order, dtype=str), emb=emb.astype(np.float32), model=np.array(model))
+        ids=np.array(order, dtype=str),
+        emb=emb.astype(np.float32),
+        model=np.array(model),
+    )
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
-    print(f"Done. {len(books)} content-only books (CF-cold) -> {data_dir}. "
-          "Add a ratings source or accumulate swipes to grow CF.")
+    print(
+        f"Done. {len(books)} content-only books (CF-cold) -> {data_dir}. "
+        "Add a ratings source or accumulate swipes to grow CF."
+    )
 
 
 def main() -> None:

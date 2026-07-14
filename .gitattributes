@@ -1,0 +1,11 @@
+# Normalize all text to LF in the repository so Windows (CRLF) checkouts and the
+# Linux CI runner agree -- otherwise `ruff format --check` can fail on line endings.
+* text=auto eol=lf
+
+# Binary artifacts: never touch line endings.
+*.npz binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gz binary
+*.db binary

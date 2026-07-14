@@ -18,7 +18,6 @@ import random
 import tempfile
 from pathlib import Path
 
-from .recommender import Scored
 from .service import BookRecommenderService
 
 # A hidden taste we use to auto-swipe, to prove the profile adapts.
@@ -26,8 +25,13 @@ LIKES = {"fantasy", "dystopian", "young-adult", "science-fiction", "dystopia"}
 DISLIKES = {"romance", "chick-lit"}
 
 SEED_QUERIES = [
-    "the hunger games", "harry potter philosophers stone", "divergent",
-    "the maze runner", "ender's game", "the giver", "fahrenheit 451",
+    "the hunger games",
+    "harry potter philosophers stone",
+    "divergent",
+    "the maze runner",
+    "ender's game",
+    "the giver",
+    "fahrenheit 451",
     "the hobbit",
 ]
 
@@ -47,8 +51,10 @@ def show(cards, label: str) -> None:
         b = c.book
         genres = ", ".join(b.get("subjects", [])[:3])
         driver = "CF" if c.cf_weight >= 0.5 else "content"
-        print(f"  {b['title'][:42]:<42} | {b.get('author','')[:20]:<20} "
-              f"| {genres:<30} | via {driver} (w_cf={c.cf_weight:.2f})")
+        print(
+            f"  {b['title'][:42]:<42} | {b.get('author', '')[:20]:<20} "
+            f"| {genres:<30} | via {driver} (w_cf={c.cf_weight:.2f})"
+        )
 
 
 def main() -> None:
@@ -77,15 +83,19 @@ def main() -> None:
             r = simulated_reaction(c.book)
             svc.swipe(uid, c.book["id"], r)
             tally[r] += 1
-        print(f"\nSwipe round {rnd}: shown {len(cards)} -> "
-              f"{tally['like']} likes, {tally['dislike']} dislikes, {tally['skip']} skips")
+        print(
+            f"\nSwipe round {rnd}: shown {len(cards)} -> "
+            f"{tally['like']} likes, {tally['dislike']} dislikes, {tally['skip']} skips"
+        )
 
     print("\nProfile now:", svc.profile_summary(uid))
     show(svc.recommendations(uid, n=8), "'For You' AFTER swiping (should skew to liked genres):")
 
     # --- a hard filter ---------------------------------------------------
-    show(svc.recommendations(uid, n=5, genres=["fantasy"], year_min=2000),
-         "Filtered: genre=fantasy, year>=2000:")
+    show(
+        svc.recommendations(uid, n=5, genres=["fantasy"], year_min=2000),
+        "Filtered: genre=fantasy, year>=2000:",
+    )
 
     svc.close()
     os.remove(tmp)

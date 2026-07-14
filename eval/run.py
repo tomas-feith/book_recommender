@@ -27,10 +27,6 @@ from __future__ import annotations
 
 import argparse
 import random
-from typing import Dict, List
-
-import numpy as np
-
 from pathlib import Path
 
 from .data import book_to_text, load_books, load_profiles
@@ -41,14 +37,14 @@ from .profiles import build_profile, rank_candidates
 
 def evaluate_model(
     embedder,
-    books: List[Dict],
-    profiles: List[Dict],
+    books: list[dict],
+    profiles: list[dict],
     strategy: str,
     k_holdout: int,
     k_eval: int,
-    seeds: List[int],
+    seeds: list[int],
     text_mode: str = "full",
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Return averaged metrics for one embedder + one profile strategy."""
     id_to_idx = {b["id"]: i for i, b in enumerate(books)}
     texts = [book_to_text(b, mode=text_mode) for b in books]
@@ -106,8 +102,12 @@ def main() -> None:
     parser.add_argument("--k-holdout", type=int, default=2, help="Liked books hidden per trial.")
     parser.add_argument("--k-eval", type=int, default=5, help="Top-K cutoff for metrics.")
     parser.add_argument("--seeds", type=int, default=5, help="Random hold-out splits per user.")
-    parser.add_argument("--books", type=Path, default=None, help="Path to a books JSON (default: sample).")
-    parser.add_argument("--profiles", type=Path, default=None, help="Path to a profiles JSON (default: sample).")
+    parser.add_argument(
+        "--books", type=Path, default=None, help="Path to a books JSON (default: sample)."
+    )
+    parser.add_argument(
+        "--profiles", type=Path, default=None, help="Path to a profiles JSON (default: sample)."
+    )
     parser.add_argument(
         "--text-mode",
         choices=["full", "no-subjects"],
@@ -135,13 +135,19 @@ def main() -> None:
     for spec in models:
         try:
             embedder = build_embedder(spec)
-        except Exception as exc:  # noqa: BLE001 - report and continue
+        except Exception as exc:
             print(f"{spec:<42} !! could not load: {exc}")
             continue
         for strat in strategies:
             m = evaluate_model(
-                embedder, books, profiles, strat, args.k_holdout,
-                args.k_eval, seeds, text_mode=args.text_mode,
+                embedder,
+                books,
+                profiles,
+                strat,
+                args.k_holdout,
+                args.k_eval,
+                seeds,
+                text_mode=args.text_mode,
             )
             name = getattr(embedder, "name", spec)
             print(

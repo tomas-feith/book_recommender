@@ -31,13 +31,9 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
-
-import numpy as np
-
-import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -53,7 +49,7 @@ DATA = ROOT / "data"
 SWIPE_RATING = {"like": 5.0, "interested": 4.0, "dislike": 2.0}
 
 
-def _catalog_order() -> List[str]:
+def _catalog_order() -> list[str]:
     books = json.loads((DATA / "real_books.json").read_text(encoding="utf-8"))
     return [b["id"] for b in books]
 
@@ -67,10 +63,10 @@ def _eval_user_ids() -> set:
     return {p["user"].removeprefix("gr_") for p in profiles}
 
 
-def _goodbooks_ratings(order: set) -> Dict[str, Dict[str, int]]:
+def _goodbooks_ratings(order: set) -> dict[str, dict[str, int]]:
     """Per-user {book_id: rating} from goodbooks, restricted to catalog books."""
     text = fetch(GB_BASE + "ratings.csv", "gb_ratings.csv")
-    by_user: Dict[str, Dict[str, int]] = defaultdict(dict)
+    by_user: dict[str, dict[str, int]] = defaultdict(dict)
     for row in load_csv(text):
         bid = row["book_id"]
         if bid in order:
@@ -78,7 +74,7 @@ def _goodbooks_ratings(order: set) -> Dict[str, Dict[str, int]]:
     return by_user
 
 
-def _app_ratings(order: set) -> Dict[str, Dict[str, float]]:
+def _app_ratings(order: set) -> dict[str, dict[str, float]]:
     """Per-user pseudo-ratings from the app's swipe log (app.db)."""
     db = DATA / "app.db"
     if not db.exists():
@@ -88,7 +84,7 @@ def _app_ratings(order: set) -> Dict[str, Dict[str, float]]:
         rows = conn.execute("SELECT user_id, book_id, reaction FROM swipes").fetchall()
     finally:
         conn.close()
-    by_user: Dict[str, Dict[str, float]] = defaultdict(dict)
+    by_user: dict[str, dict[str, float]] = defaultdict(dict)
     for user_id, book_id, reaction in rows:
         if book_id in order and reaction in SWIPE_RATING:
             by_user[user_id][book_id] = SWIPE_RATING[reaction]
@@ -96,8 +92,9 @@ def _app_ratings(order: set) -> Dict[str, Dict[str, float]]:
 
 
 def rebuild_cf(data_dir: Path = DATA) -> None:
-    from app.store import save_cf
     from cf_build import ease_cf
+
+    from app.store import save_cf
 
     order = _catalog_order()
     order_set = set(order)
@@ -108,7 +105,7 @@ def rebuild_cf(data_dir: Path = DATA) -> None:
 
     # Combine: goodbooks non-eval users + all app users. Namespaced keys so a
     # goodbooks id and an app id can never collide.
-    combined: Dict[str, Dict[str, float]] = {}
+    combined: dict[str, dict[str, float]] = {}
     for uid, ratings in gb.items():
         if uid not in eval_uids:
             combined[f"gb:{uid}"] = ratings
@@ -118,18 +115,24 @@ def rebuild_cf(data_dir: Path = DATA) -> None:
     sim, pop = ease_cf(order, combined)
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
     n_app = sum(1 for k in combined if k.startswith("app:"))
-    print(f"Rebuilt EASE-R CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) from "
-          f"{len(combined)} users ({n_app} from app swipes) -> {data_dir / 'real_cf.npz'}")
+    print(
+        f"Rebuilt EASE-R CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) from "
+        f"{len(combined)} users ({n_app} from app swipes) -> {data_dir / 'real_cf.npz'}"
+    )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Refresh the serving catalog.")
-    ap.add_argument("--add", metavar="PATH",
-                    help="JSON list of new book records to ingest first.")
-    ap.add_argument("--fetch-new", type=int, metavar="N",
-                    help="Pull N new books from Open Library and ingest them.")
-    ap.add_argument("--no-cf", action="store_true",
-                    help="Skip the CF rebuild (only ingest new books).")
+    ap.add_argument("--add", metavar="PATH", help="JSON list of new book records to ingest first.")
+    ap.add_argument(
+        "--fetch-new",
+        type=int,
+        metavar="N",
+        help="Pull N new books from Open Library and ingest them.",
+    )
+    ap.add_argument(
+        "--no-cf", action="store_true", help="Skip the CF rebuild (only ingest new books)."
+    )
     args = ap.parse_args()
 
     if args.add:

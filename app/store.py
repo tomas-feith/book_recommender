@@ -19,9 +19,9 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set
 
 import numpy as np
 from scipy import sparse
@@ -52,6 +52,7 @@ def save_cf(path: Path, ids: Sequence[str], sim: sparse.csr_matrix, pop: np.ndar
         sim_shape=np.array(sim.shape, dtype=np.int64),
     )
     import os
+
     os.replace(tmp, path)
 
 
@@ -69,14 +70,14 @@ def load_cf(path: Path):
 
 @dataclass
 class Catalog:
-    books: List[dict]
-    emb: np.ndarray                 # (N, D) L2-normalized
-    sim: sparse.csr_matrix          # (N, N) item-item CF (sparse top-k), 0 diagonal
-    pop: np.ndarray                 # (N,) rating counts (CF-warmth proxy)
-    id_to_idx: Dict[str, int]
+    books: list[dict]
+    emb: np.ndarray  # (N, D) L2-normalized
+    sim: sparse.csr_matrix  # (N, N) item-item CF (sparse top-k), 0 diagonal
+    pop: np.ndarray  # (N,) rating counts (CF-warmth proxy)
+    id_to_idx: dict[str, int]
 
     @classmethod
-    def load(cls, data_dir: Path = DATA) -> "Catalog":
+    def load(cls, data_dir: Path = DATA) -> Catalog:
         books = load_books(data_dir / "real_books.json")
         id_to_idx = {b["id"]: i for i, b in enumerate(books)}
 
@@ -89,7 +90,7 @@ class Catalog:
 
         cf_ids, cf_sim, cf_pop = load_cf(data_dir / "real_cf.npz")
         p = perm_for(cf_ids)
-        sim = cf_sim[p][:, p].tocsr()   # reorder rows AND columns to catalog order
+        sim = cf_sim[p][:, p].tocsr()  # reorder rows AND columns to catalog order
         pop = cf_pop[p]
         return cls(books, emb, sim, pop, id_to_idx)
 
@@ -99,15 +100,15 @@ class Catalog:
     def idx(self, book_id: str) -> int:
         return self.id_to_idx[book_id]
 
-    def indices(self, book_ids: Sequence[str]) -> List[int]:
+    def indices(self, book_ids: Sequence[str]) -> list[int]:
         return [self.id_to_idx[b] for b in book_ids if b in self.id_to_idx]
 
     def filter_mask(
         self,
-        languages: Optional[Sequence[str]] = None,
-        genres: Optional[Sequence[str]] = None,
-        year_min: Optional[int] = None,
-        year_max: Optional[int] = None,
+        languages: Sequence[str] | None = None,
+        genres: Sequence[str] | None = None,
+        year_min: int | None = None,
+        year_max: int | None = None,
     ) -> np.ndarray:
         """Boolean mask over the catalog for the given hard filters.
 
@@ -116,7 +117,7 @@ class Catalog:
         """
         mask = np.ones(len(self), dtype=bool)
         genre_set = {g.lower() for g in genres} if genres else None
-        lang_set = {l.lower() for l in languages} if languages else None
+        lang_set = {lang.lower() for lang in languages} if languages else None
         for i, b in enumerate(self.books):
             if lang_set and (b.get("language", "") or "").lower() not in lang_set:
                 mask[i] = False
@@ -129,8 +130,8 @@ class Catalog:
                 mask[i] = False
         return mask
 
-    def all_genres(self) -> List[str]:
-        seen: Dict[str, int] = {}
+    def all_genres(self) -> list[str]:
+        seen: dict[str, int] = {}
         for b in self.books:
             for s in b.get("subjects", []):
                 seen[s] = seen.get(s, 0) + 1
@@ -172,9 +173,7 @@ class SwipeStore:
         return uid
 
     def user_exists(self, user_id: str) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM users WHERE id=?", (user_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone()
         return row is not None
 
     def set_name(self, user_id: str, name: str) -> None:
@@ -183,16 +182,13 @@ class SwipeStore:
             self.conn.commit()
 
     def user_name(self, user_id: str) -> str:
-        row = self.conn.execute(
-            "SELECT name FROM users WHERE id=?", (user_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
         return (row["name"] if row else "") or ""
 
-    def named_users(self) -> List[dict]:
+    def named_users(self) -> list[dict]:
         """Saved profiles (those the user gave a real name), newest first."""
         rows = self.conn.execute(
-            "SELECT id, name FROM users "
-            "WHERE name != '' AND name != 'web' ORDER BY created_at DESC"
+            "SELECT id, name FROM users WHERE name != '' AND name != 'web' ORDER BY created_at DESC"
         ).fetchall()
         return [{"id": r["id"], "name": r["name"]} for r in rows]
 
@@ -209,13 +205,13 @@ class SwipeStore:
             )
             self.conn.commit()
 
-    def reactions(self, user_id: str) -> Dict[str, str]:
+    def reactions(self, user_id: str) -> dict[str, str]:
         rows = self.conn.execute(
             "SELECT book_id, reaction FROM swipes WHERE user_id=?", (user_id,)
         ).fetchall()
         return {r["book_id"]: r["reaction"] for r in rows}
 
-    def seen(self, user_id: str) -> Set[str]:
+    def seen(self, user_id: str) -> set[str]:
         return set(self.reactions(user_id).keys())
 
     def close(self) -> None:

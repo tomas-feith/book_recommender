@@ -20,13 +20,11 @@ sparse top-k output of either builder is ~5-10 MB with no ranking loss.
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
-
 import numpy as np
 from scipy import sparse
 
 
-def _binary_user_item(order: List[str], by_user: Dict[str, Dict[str, float]]):
+def _binary_user_item(order: list[str], by_user: dict[str, dict[str, float]]):
     """Return (X, pop): binary users×items CSR and per-item rating counts."""
     idx = {bid: i for i, bid in enumerate(order)}
     n = len(order)
@@ -40,7 +38,8 @@ def _binary_user_item(order: List[str], by_user: Dict[str, Dict[str, float]]):
     n_users = sum(1 for r in by_user.values() if r)
     X = sparse.csr_matrix(
         (np.ones(len(rows), dtype=np.float32), (rows, cols)),
-        shape=(n_users, n), dtype=np.float32,
+        shape=(n_users, n),
+        dtype=np.float32,
     )
     pop = np.asarray(X.sum(axis=0)).ravel().astype(np.float32)
     return X, pop
@@ -52,7 +51,7 @@ def _topk_rows(B: np.ndarray, k: int) -> sparse.csr_matrix:
     if k >= n:
         keep = B
     else:
-        idx = np.argpartition(-B, k, axis=1)[:, :k]        # k largest per row
+        idx = np.argpartition(-B, k, axis=1)[:, :k]  # k largest per row
         keep = np.zeros_like(B)
         ri = np.arange(n)[:, None]
         keep[ri, idx] = B[ri, idx]
@@ -60,11 +59,11 @@ def _topk_rows(B: np.ndarray, k: int) -> sparse.csr_matrix:
 
 
 def ease_cf(
-    order: List[str],
-    by_user: Dict[str, Dict[str, float]],
+    order: list[str],
+    by_user: dict[str, dict[str, float]],
     lam: float = 1000.0,
     k: int = 50,
-) -> Tuple[sparse.csr_matrix, np.ndarray]:
+) -> tuple[sparse.csr_matrix, np.ndarray]:
     """Return (sim, pop): EASE-R item-item weights truncated to top-k per row.
 
     ``order`` is the canonical book id order; ``by_user`` maps user -> {book_id:
@@ -86,11 +85,11 @@ def ease_cf(
 
 
 def sparse_topk_cf(
-    order: List[str],
-    by_user: Dict[str, Dict[str, float]],
+    order: list[str],
+    by_user: dict[str, dict[str, float]],
     k: int = 100,
     block: int = 500,
-) -> Tuple[sparse.csr_matrix, np.ndarray]:
+) -> tuple[sparse.csr_matrix, np.ndarray]:
     """Return (sim, pop): a symmetric CSR top-k similarity matrix + rating counts.
 
     ``order`` is the canonical book id order; ``by_user`` maps user -> {book_id:
@@ -114,7 +113,8 @@ def sparse_topk_cf(
             pop[i] += 1.0
     R = sparse.csr_matrix(
         (np.array(vals, dtype=np.float32), (rows, cols)),
-        shape=(n, len(users)), dtype=np.float32,
+        shape=(n, len(users)),
+        dtype=np.float32,
     )
 
     # L2-normalize each book row so cosine == dot.
@@ -128,23 +128,25 @@ def sparse_topk_cf(
     for start in range(0, n, block):
         stop = min(start + block, n)
         S = np.asarray((Rn[start:stop] @ RnT).todense())  # (b, n) dense block
-        np.fill_diagonal(S[:, start:stop], 0.0)           # drop self-similarity
+        np.fill_diagonal(S[:, start:stop], 0.0)  # drop self-similarity
         for r_local in range(stop - start):
             row = S[r_local]
             if k < n:
                 cand = np.argpartition(-row, k)[:k]
             else:
                 cand = np.arange(n)
-            cand = cand[row[cand] > 0.0]                   # only positive neighbors
+            cand = cand[row[cand] > 0.0]  # only positive neighbors
             cand = cand[np.argsort(-row[cand])]
             indices.extend(int(c) for c in cand)
             data.extend(float(row[c]) for c in cand)
             indptr.append(len(indices))
 
     sim = sparse.csr_matrix(
-        (np.array(data, dtype=np.float32),
-         np.array(indices, dtype=np.int32),
-         np.array(indptr, dtype=np.int64)),
+        (
+            np.array(data, dtype=np.float32),
+            np.array(indices, dtype=np.int32),
+            np.array(indptr, dtype=np.int64),
+        ),
         shape=(n, n),
     )
     # Adjusted cosine is symmetric; top-k per row is not, so union the two views

@@ -17,7 +17,7 @@ upgrade will live.
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -56,7 +56,7 @@ def rank_candidates(
     profile: np.ndarray,
     catalog_vecs: np.ndarray,
     candidate_idx: Sequence[int],
-) -> List[int]:
+) -> list[int]:
     """Rank ``candidate_idx`` (rows of ``catalog_vecs``) by cosine to profile.
 
     Returns candidate indices ordered best-first. All vectors are assumed

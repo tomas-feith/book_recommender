@@ -1,5 +1,7 @@
 # Book recommender
 
+[![CI](https://github.com/tomas-feith/book_recommender/actions/workflows/ci.yml/badge.svg)](https://github.com/tomas-feith/book_recommender/actions/workflows/ci.yml)
+
 Swipe-based book discovery: name a few books you love, then swipe through a
 personalized deck — **like / interested / haven't read / pass** — while an
 adaptive-hybrid recommender re-ranks after every swipe. The product sits on top of an **offline evaluation
@@ -236,6 +238,31 @@ to re-test on `eval.cold_start`. For the warm hybrid we serve, `bge-small` stays
 | `eval/profiles.py`  | `mean` and `rocchio` taste-vector builders. |
 | `eval/metrics.py`   | Recall@K, NDCG@K, MRR. |
 | `eval/run.py` / `compare_paradigms.py` / `cold_start.py` | The scoreboards. |
+
+## Development
+
+Lint, type-check, and tests run in CI on every push/PR (`.github/workflows/ci.yml`)
+and as pre-commit hooks. Everything goes through the uv-locked environment, so the
+same tool versions run locally and in CI.
+
+```bash
+uv sync                                          # install deps + dev tools
+uv run --no-sync pre-commit install              # ruff + mypy on commit
+uv run --no-sync pre-commit install --hook-type pre-push   # pytest on push
+
+uv run --no-sync ruff check .                    # lint
+uv run --no-sync ruff format .                   # format
+uv run --no-sync mypy                            # type-check (app/ + eval/)
+uv run --no-sync python -m pytest                # unit tests (tests/)
+```
+
+The suite (`tests/`) covers the pure logic — ranking metrics, taste profiles, the
+hashing embedder, title search, catalog filters, the CF-matrix round-trip, both
+CF builders (KNN + **EASE-R**), and the recommender's scoring/selection contracts
+— all on tiny synthetic fixtures, so it runs in ~1s with no data files or torch.
+`ruff format` is enforced (`--check`) in CI; `mypy` is scoped to the `app/` and
+`eval/` library (the `scripts/` are operational glue over untyped, network-heavy
+deps).
 
 ## Migrating to Postgres + pgvector
 

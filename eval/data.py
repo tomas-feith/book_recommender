@@ -11,24 +11,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
-def load_books(path: Path | None = None) -> List[Dict]:
+def load_books(path: Path | None = None) -> list[dict]:
     path = path or DATA_DIR / "sample_books.json"
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def load_profiles(path: Path | None = None) -> List[Dict]:
+def load_profiles(path: Path | None = None) -> list[dict]:
     path = path or DATA_DIR / "sample_profiles.json"
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def book_to_text(book: Dict, mode: str = "full") -> str:
+def book_to_text(book: dict, mode: str = "full") -> str:
     """Compose the semantic text used to embed a book.
 
     ``mode`` controls how much explicit genre signal leaks into the text:
