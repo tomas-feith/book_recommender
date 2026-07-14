@@ -1,7 +1,7 @@
-"""Tinder for books — Streamlit UI over the recommender service.
+"""Streamlit UI over the recommender service.
 
-Onboard by naming books you love, then swipe (like / haven't read / dislike).
-The adaptive-hybrid recommender updates your taste after every swipe.
+Onboard by naming books you love, then swipe (like / interested / haven't read /
+pass). The adaptive-hybrid recommender updates your taste after every swipe.
 
 Run:  streamlit run streamlit_app.py
 """

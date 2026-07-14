@@ -1,13 +1,13 @@
-# Book recommender — Tinder for books
+# Book recommender
 
-Name a few books you love, then swipe through a personalized deck — **like /
-interested / haven't read / pass** — while an adaptive-hybrid recommender
-re-ranks after every swipe. The product sits on top of an **offline evaluation
+Swipe-based book discovery: name a few books you love, then swipe through a
+personalized deck — **like / interested / haven't read / pass** — while an
+adaptive-hybrid recommender re-ranks after every swipe. The product sits on top of an **offline evaluation
 harness** that picked the embedding model and the recommender architecture on
 real numbers instead of vibes; that evidence is documented at the bottom.
 
-The serving catalog is **1000 real books** from goodbooks-10k, with real reader
-shelf-tags as genres and Open Library descriptions.
+The serving catalog is **10,000 real books** (all of goodbooks-10k), with real
+reader shelf-tags as genres and Open Library descriptions.
 
 ## Quick start
 
@@ -15,12 +15,15 @@ The project uses a **uv-managed** environment on Python 3.12 (torch and Streamli
 both have wheels there):
 
 ```bash
-uv sync                                 # create the venv, install deps
-uv run streamlit run streamlit_app.py   # the app at http://localhost:8501
+uv sync                                          # create the venv, install deps
+uv run --no-sync python scripts/build_real_dataset.py   # generate data/real_cf.npz (gitignored, ~10MB)
+uv run streamlit run streamlit_app.py            # the app at http://localhost:8501
 ```
 
-Serving needs **only numpy** — book vectors are precomputed and cached to disk,
-so torch is an *offline-only* dependency (used to build embeddings, not to serve).
+The sparse CF matrix (`data/real_cf.npz`) is **gitignored** — it's regenerable,
+so build it once with the step above (or `refresh.py`). Serving needs only
+**numpy + scipy** (scipy loads the sparse matrix); torch is an *offline-only*
+dependency, used to build embeddings, not to serve.
 
 ## The app
 
@@ -65,7 +68,7 @@ headings (Fraunces) over an Inter body, pill buttons.
 
 | Module | Role |
 |--------|------|
-| `app/store.py`       | `Catalog` (books + embeddings + CF matrix + popularity + metadata filters, one aligned index) and `SwipeStore` (users/swipes/profiles in SQLite). Split so the store can move to Postgres+pgvector without touching the rest. |
+| `app/store.py`       | `Catalog` (books + embeddings + **sparse top-k CF matrix** + popularity + metadata filters, one aligned index) and `SwipeStore` (users/swipes/profiles in SQLite). Split so the store can move to Postgres+pgvector without touching the rest. |
 | `app/recommender.py` | Adaptive hybrid: Rocchio profile, content + CF scores, **per-item weight by rating count** (`cf_weight`), MMR diversity, exploit/explore card selection, `surprise()`, author dedup. |
 | `app/search.py`      | Fuzzy title resolution for the seed step. |
 | `app/service.py`     | `BookRecommenderService`: users/profiles, `seed`, `next_cards`, `swipe`, `recommendations`, `surprises`, `wishlist`, filters. The seam a UI/HTTP layer sits on. |
@@ -103,8 +106,9 @@ Every book is three aligned artifacts, all keyed by book id:
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/build_real_dataset.py` | Build the whole dataset from goodbooks-10k: top-`N_BOOKS` (=1000) by rating count, reader shelf-tags as genres, Open Library descriptions, 120 focused eval users, and the CF matrix (from ~53k *non-eval* users, so the harness stays honest). |
-| `scripts/build_embeddings.py`   | Cache `bge-small-en-v1.5` vectors (1000×384) so serving never loads torch. |
+| `scripts/build_real_dataset.py` | Build the whole dataset from goodbooks-10k: top-`N_BOOKS` (=10000) by rating count, reader shelf-tags as genres, Open Library descriptions, 120 focused eval users, and the sparse CF matrix (from ~53k *non-eval* users, so the harness stays honest). |
+| `scripts/build_embeddings.py`   | Cache `bge-small-en-v1.5` vectors (10000×384) so serving never loads torch. |
+| `scripts/cf_build.py`           | Shared **sparse top-k** CF builder (adjusted-cosine, k=100, block-wise). A dense 10k×10k matrix would be ~370MB; this is ~7MB with no ranking loss. |
 | `scripts/fetch_new_books.py`    | Pull genuinely-new books from the **Open Library** search API (by subject, English, recent-year range, ranked by reader count; requires author + cover). Maps to the catalog schema with `ol:`-prefixed ids and dedups against existing ids/titles. |
 | `scripts/add_books.py`          | **Incrementally** append new books to all three artifacts — embeds only the new ones (same model, guarded), grows CF with zero rows so new books start cold (pop=0, content-ranked). Idempotent, atomic. |
 | `scripts/refresh.py`            | **Periodic refresh.** Rebuilds CF from *all* accumulated signal — goodbooks ratings **plus the app's own swipe log** (like/interested/dislike → pseudo-ratings 5/4/2) — so engaged books gain collaborative warmth over time and formerly-cold books warm up. `--add PATH` ingests a file first; `--fetch-new N` pulls N new books from Open Library and ingests them in one step. Eval users stay excluded. |
@@ -133,6 +137,10 @@ uv run --no-sync python -m eval.cold_start            # the onboarding regime
 ```
 
 ### Paradigm comparison (warm users, Recall@10)
+
+*(Numbers below were measured on an earlier dense-CF catalog snapshot; they
+illustrate the architectural conclusion, which is what drove the design. Re-run
+the commands above for current figures on the 10k top-k catalog.)*
 
 | recommender             | Recall@10 | note |
 |-------------------------|-----------|------|

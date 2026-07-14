@@ -1,4 +1,4 @@
-"""End-to-end demo of the 'Tinder for books' loop on real data.
+"""End-to-end demo of the seed -> recommend -> swipe -> adapt loop on real data.
 
 Runs a scripted session so it works non-interactively:
   1. create a user

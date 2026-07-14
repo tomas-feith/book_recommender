@@ -7,7 +7,7 @@ embeddings are unaffected: a description exists the moment a book is added.
 
 For each user we hold out books they liked that fall in the cold set, and ask
 whether the recommender ranks those unrated-but-relevant books highly. This is
-the exact regime the "Tinder" onboarding lives in, and the half of the story the
+the exact regime the swipe-onboarding lives in, and the half of the story the
 warm-user comparison (eval.compare_paradigms) structurally cannot measure.
 
 Run:  python -m eval.cold_start

@@ -1,7 +1,7 @@
 [project]
 name = "book-recommender"
 version = "0.1.0"
-description = "Tinder-for-books recommender: seed, swipe, and adaptive-hybrid recommendations."
+description = "Swipe-based book recommender: seed, swipe, and adaptive-hybrid recommendations."
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.26",
