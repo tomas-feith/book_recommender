@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import random
 import re
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from .external import enrich_description, search_books
 from .library import LibraryEntry
 from .recommender import Recommender, Scored
 from .search import Match, TitleIndex
-from .store import DATA, Catalog, SwipeStore
+from .store import DATA, Catalog, SwipeStore, append_to_catalog_files
 
 _AUTHOR_TOK = re.compile(r"[a-z]{2,}")
 
@@ -58,6 +60,7 @@ class BookRecommenderService:
         self.store = SwipeStore(db_path or data_dir / "app.db", check_same_thread=check_same_thread)
         self._encoder_cache: object | None = None
         self._encoder_loaded = False
+        self._catalog_lock = threading.Lock()  # guards on-demand catalog growth
 
     # ---- users --------------------------------------------------------------
 
@@ -122,6 +125,38 @@ class BookRecommenderService:
     def similar_books(self, book_id: str, n: int = 8) -> list[Scored]:
         """'More like this' for a given book (content + CF neighbours)."""
         return self.recommender.similar(book_id, n)
+
+    def external_search(self, query: str, k: int = 5) -> list[dict]:
+        """Look a title up on Open Library (for books not in the catalog)."""
+        return search_books(query, k=k)
+
+    def add_external_book(self, record: dict, embedding: np.ndarray | None = None) -> str:
+        """Ingest an Open Library record into the catalog CF-cold; return its id.
+
+        The book is embedded (co-read encoder), appended to the live in-memory
+        catalog + title index, and persisted to disk so it survives a restart. It
+        starts with pop=0 (content-ranked) and can immediately be liked. Idempotent.
+        """
+        from eval.data import book_to_text
+
+        rec = _external_record(record)
+        if rec["id"] in self.catalog.id_to_idx:
+            return rec["id"]
+        rec = enrich_description(rec)  # fetch the description before embedding
+        if embedding is None:
+            enc = self._encoder()
+            if enc is None:
+                raise RuntimeError("embedding encoder unavailable")
+            embedding = enc.encode([book_to_text(rec)], normalize_embeddings=True)[0].astype(
+                np.float32
+            )
+        with self._catalog_lock:
+            if rec["id"] in self.catalog.id_to_idx:  # re-check under the lock
+                return rec["id"]
+            self.catalog.append(rec, embedding)
+            self.titles = TitleIndex(self.catalog)
+            append_to_catalog_files([rec], np.asarray(embedding)[None, :], self.data_dir)
+        return rec["id"]
 
     def _encoder(self):
         """Lazily load the embedding encoder (the co-read one if built, else base).
@@ -226,3 +261,17 @@ def _clean_filters(filters: dict) -> dict:
     """Keep only the filter keys Catalog.filter_mask understands, dropping Nones."""
     allowed = ("languages", "genres", "year_min", "year_max")
     return {k: v for k, v in filters.items() if k in allowed and v is not None}
+
+
+def _external_record(record: dict) -> dict:
+    """Coerce an external (Open Library) record into the catalog schema."""
+    return {
+        "id": str(record["id"]),
+        "title": record.get("title", ""),
+        "author": record.get("author", ""),
+        "subjects": record.get("subjects", []),
+        "language": record.get("language", "en"),
+        "year": record.get("year"),
+        "image": record.get("image", ""),
+        "description": record.get("description", ""),
+    }

@@ -128,3 +128,12 @@ def test_semantic_search_falls_back_without_encoder(tiny_catalog, tmp_path):
     assert svc.semantic_search("books about the desert") == []
     assert svc.semantic_search("") == []
     svc.store.close()
+
+
+def test_add_external_book_is_idempotent_for_known_ids(tiny_catalog, tmp_path):
+    svc = _service(tiny_catalog, tmp_path)
+    n0 = len(svc.catalog.books)
+    # b0 is already in the catalog -> returns its id without re-adding or fetching
+    assert svc.add_external_book({"id": "b0", "title": "Dune"}) == "b0"
+    assert len(svc.catalog.books) == n0
+    svc.store.close()

@@ -121,6 +121,19 @@ def import_library_cb() -> None:
     }
 
 
+def web_search_cb() -> None:
+    q = st.session_state.get("last_query", "")
+    st.session_state.web_hits = svc.external_search(q, k=5) if q else []
+
+
+def add_web_book(record: dict) -> None:
+    """Ingest a book we didn't have (from Open Library) and seed it as a like."""
+    bid = svc.add_external_book(record)
+    svc.swipe(st.session_state.user_id, bid, "like")
+    st.session_state.seeds[bid] = record["title"]
+    st.session_state.web_hits = [h for h in st.session_state.get("web_hits", []) if h["id"] != bid]
+
+
 def start_swiping() -> None:
     st.session_state.phase = "swiping"
     st.session_state.queue = []
@@ -274,6 +287,8 @@ if st.session_state.phase == "onboarding":
         query = st.text_input("Search", placeholder=placeholder, label_visibility="collapsed")
         submitted = st.form_submit_button("Search", icon=":material/search:")
     if submitted and query:
+        st.session_state.last_query = query
+        st.session_state.web_hits = []  # reset any prior online results
         if by_meaning:
             hits = svc.semantic_search(query, k=6)
             if hits:
@@ -315,6 +330,25 @@ if st.session_state.phase == "onboarding":
                 on_click=add_seed,
                 args=(m.book_id, m.title),
             )
+
+    # Not in our catalog? Fetch it from Open Library and add it (CF-cold).
+    last_q = st.session_state.get("last_query", "")
+    if last_q and not st.session_state.get("semantic_mode"):
+        with st.expander(f"Not seeing it? Search the web for '{last_q[:40]}'"):
+            st.button("Search Open Library", icon=":material/public:", on_click=web_search_cb)
+            for r in st.session_state.get("web_hits", []):
+                if r["id"] in st.session_state.seeds:
+                    continue
+                yr = f" ({r['year']})" if r.get("year") else ""
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    st.markdown(f"**{r['title'][:44]}** — {(r.get('author') or '')[:26]}{yr}")
+                    st.button(
+                        "Add",
+                        icon=":material/add:",
+                        key=f"web_add_{r['id']}",
+                        on_click=add_web_book,
+                        args=(r,),
+                    )
 
     if st.session_state.seeds:
         st.subheader("Your picks", anchor=False)

@@ -68,6 +68,42 @@ def load_cf(path: Path):
     return ids, sim, pop
 
 
+def append_to_catalog_files(to_add: list[dict], new_emb: np.ndarray, data_dir: Path = DATA) -> None:
+    """Persist already-embedded new books to the three on-disk artifacts (atomic).
+
+    ``new_emb`` is the (k, D) embedding matrix for ``to_add``. New books get pop=0
+    and empty CF rows/cols. Callers dedup first. Used by ``scripts/add_books.py``
+    (batch) and the live service (on-demand adds) so a book survives a restart.
+    """
+    import json
+    import os
+
+    from eval.data import load_books
+
+    emb_path, cf_path = data_dir / "real_embeddings.npz", data_dir / "real_cf.npz"
+    with np.load(emb_path, allow_pickle=True) as z:  # close handle before writing (Windows lock)
+        old_emb, old_ids, model = z["emb"], z["ids"].astype(str), np.array(z["model"])
+    old_cf_ids, sim, pop = load_cf(cf_path)
+
+    books = load_books(data_dir / "real_books.json")
+    books.extend(to_add)
+    new_ids = [b["id"] for b in to_add]
+    k = len(to_add)
+    emb = np.vstack([old_emb, new_emb]).astype(np.float16)  # keep fp16 storage
+    emb_ids = np.concatenate([old_ids, np.array(new_ids, dtype=str)])
+    grown = sparse.block_diag([sim, sparse.csr_matrix((k, k))], format="csr")
+    new_pop = np.concatenate([pop, np.zeros(k, dtype=np.float32)]).astype(np.float32)
+
+    tmp = emb_path.with_name(emb_path.stem + ".tmp.npz")
+    np.savez_compressed(tmp, ids=emb_ids, emb=emb, model=model)
+    os.replace(tmp, emb_path)
+    save_cf(cf_path, list(old_cf_ids) + new_ids, grown, new_pop)
+    books_path = data_dir / "real_books.json"
+    tmpj = books_path.with_suffix(".json.tmp")
+    tmpj.write_text(json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmpj, books_path)
+
+
 @dataclass
 class Catalog:
     books: list[dict]
@@ -126,6 +162,24 @@ class Catalog:
 
     def indices(self, book_ids: Sequence[str]) -> list[int]:
         return [self.id_to_idx[b] for b in book_ids if b in self.id_to_idx]
+
+    def append(self, book: dict, emb_vec: np.ndarray) -> int:
+        """Append one CF-cold book to the in-memory catalog; returns its index.
+
+        The book gets pop=0 and an empty CF row/col (content-ranked until it accrues
+        reactions). Filter indices are rebuilt. Persist separately with
+        ``append_to_catalog_files`` so a restart keeps it.
+        """
+        i = len(self.books)
+        self.books.append(book)
+        self.emb = np.vstack([self.emb, np.asarray(emb_vec, dtype=self.emb.dtype)[None, :]])
+        self.sim = sparse.block_diag(
+            [self.sim, sparse.csr_matrix((1, 1), dtype=self.sim.dtype)], format="csr"
+        ).tocsr()
+        self.pop = np.append(self.pop, np.float32(0.0))
+        self.id_to_idx[book["id"]] = i
+        self.__post_init__()  # rebuild language/year/genre filter indices
+        return i
 
     def filter_mask(
         self,

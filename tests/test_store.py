@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
-from app.store import Catalog, SwipeStore, load_cf, save_cf
+from app.store import Catalog, SwipeStore, append_to_catalog_files, load_cf, save_cf
 
 
 def test_save_load_cf_round_trip(tmp_path):
@@ -53,6 +53,73 @@ def test_all_genres_ranked_by_frequency(tiny_catalog: Catalog):
 
 def test_indices_skips_unknown_ids(tiny_catalog: Catalog):
     assert tiny_catalog.indices(["b1", "nope", "b3"]) == [1, 3]
+
+
+def test_catalog_append_grows_in_memory_cf_cold(tiny_catalog: Catalog):
+    n0 = len(tiny_catalog.books)
+    book = {
+        "id": "new1",
+        "title": "New",
+        "author": "A",
+        "subjects": ["cyberpunk"],
+        "language": "en",
+        "year": 2024,
+        "description": "",
+    }
+    i = tiny_catalog.append(book, np.arange(8, dtype=np.float32))
+    assert i == n0 and tiny_catalog.idx("new1") == n0
+    assert tiny_catalog.emb.shape == (n0 + 1, 8)
+    assert tiny_catalog.sim.shape == (n0 + 1, n0 + 1)
+    assert tiny_catalog.pop[n0] == 0.0  # CF-cold
+    # its genre is now filterable (the index was rebuilt)
+    assert tiny_catalog.filter_mask(genres=["cyberpunk"])[n0]
+
+
+def test_append_to_catalog_files_roundtrips(tmp_path):
+    import json
+
+    books = [
+        {
+            "id": "a",
+            "title": "A",
+            "author": "x",
+            "subjects": [],
+            "language": "en",
+            "year": 2000,
+            "description": "",
+        }
+    ]
+    (tmp_path / "real_books.json").write_text(json.dumps(books), encoding="utf-8")
+    np.savez_compressed(
+        tmp_path / "real_embeddings.npz",
+        ids=np.array(["a"]),
+        emb=np.zeros((1, 4), np.float16),
+        model=np.array("m"),
+    )
+    save_cf(
+        tmp_path / "real_cf.npz",
+        ["a"],
+        sparse.csr_matrix((1, 1), dtype=np.float32),
+        np.array([5.0], np.float32),
+    )
+
+    new = [
+        {
+            "id": "b",
+            "title": "B",
+            "author": "y",
+            "subjects": ["scifi"],
+            "language": "en",
+            "year": 2024,
+            "description": "",
+        }
+    ]
+    append_to_catalog_files(new, np.ones((1, 4), np.float32), tmp_path)
+
+    cat = Catalog.load(tmp_path)
+    assert [b["id"] for b in cat.books] == ["a", "b"]
+    assert cat.emb.shape == (2, 4) and cat.sim.shape == (2, 2)
+    assert cat.pop[cat.idx("b")] == 0.0  # appended CF-cold
 
 
 def _store(tmp_path) -> SwipeStore:
