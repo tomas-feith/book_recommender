@@ -8,11 +8,14 @@ Run:  streamlit run streamlit_app.py
 
 from __future__ import annotations
 
+import csv
+import io
 import random
 
 import streamlit as st
 
 from app.library import parse_library
+from app.search import Match
 from app.service import BookRecommenderService
 from app.store import DATA
 
@@ -163,6 +166,30 @@ def cover(container, book: dict) -> None:
         container.markdown(":material/menu_book:")
 
 
+def more_like_this(book_id: str, key: str) -> None:
+    """A 'More like this' popover listing similar books, each saveable."""
+    with st.popover("More like this", icon=":material/travel_explore:"):
+        for s in svc.similar_books(book_id, n=6):
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.markdown(f"**{s.book['title'][:34]}** · {(s.book.get('author') or '')[:22]}")
+                st.button(
+                    "Save",
+                    icon=":material/bookmark_add:",
+                    key=f"more_{key}_{s.book['id']}",
+                    on_click=react,
+                    args=(s.book["id"], "interested"),
+                )
+
+
+def reading_list_csv(books: list[dict]) -> bytes:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Title", "Author", "Year"])
+    for b in books:
+        w.writerow([b.get("title", ""), b.get("author", ""), b.get("year", "") or ""])
+    return buf.getvalue().encode("utf-8")
+
+
 # --- sidebar ------------------------------------------------------------------
 
 with st.sidebar:
@@ -234,16 +261,29 @@ if st.session_state.phase == "onboarding":
     st.title("Name a few books you love", anchor=False)
     st.caption(f"We'll find your next favourites from there. Add at least {MIN_SEEDS}.")
 
+    by_meaning = st.toggle(
+        "Search by meaning",
+        key="semantic_mode",
+        help="Describe what you're after (e.g. 'a lonely lighthouse keeper') instead of a title.",
+    )
     with (
         st.form("seed_search", border=False, clear_on_submit=True),
         st.container(horizontal=True, vertical_alignment="bottom"),
     ):
-        query = st.text_input(
-            "Search a title", placeholder="e.g. The Hobbit", label_visibility="collapsed"
-        )
+        placeholder = "e.g. slow-burn space opera" if by_meaning else "e.g. The Hobbit"
+        query = st.text_input("Search", placeholder=placeholder, label_visibility="collapsed")
         submitted = st.form_submit_button("Search", icon=":material/search:")
     if submitted and query:
-        st.session_state.search_hits = svc.search_titles(query, k=5)
+        if by_meaning:
+            hits = svc.semantic_search(query, k=6)
+            if hits:
+                st.session_state.search_hits = [
+                    Match(b["id"], b["title"], b.get("author", ""), 0.0) for b in hits
+                ]
+            else:  # encoder unavailable -> fall back to title search
+                st.session_state.search_hits = svc.search_titles(query, k=5)
+        else:
+            st.session_state.search_hits = svc.search_titles(query, k=5)
 
     with st.expander("…or import your reading list (CSV, TSV, TXT, XLSX)"):
         st.file_uploader(
@@ -385,6 +425,8 @@ else:
                     st.caption(r.book.get("author", ""))
                     if genre_badges(r.book, n=2):
                         st.markdown(genre_badges(r.book, n=2))
+                    if r.explanation:
+                        st.caption(f":material/lightbulb: {r.explanation}")
                     with st.container(horizontal=True):
                         st.button(
                             "Save",
@@ -400,6 +442,7 @@ else:
                             on_click=react,
                             args=(r.book["id"], "dislike"),
                         )
+                    more_like_this(r.book["id"], key=f"fy_{r.book['id']}")
 
     with surprise_tab:
         surprises = svc.surprises(st.session_state.user_id, n=9, **current_filters())
@@ -447,7 +490,15 @@ else:
         if not wish:
             st.caption("Books you mark **Interested** land here — your saved reading list.")
         else:
-            st.caption("Your saved books. Remove one to take it off the list.")
+            with st.container(horizontal=True, vertical_alignment="center"):
+                st.caption(f"{len(wish)} saved. Mark one read, remove it, or export the list.")
+                st.download_button(
+                    "Export CSV",
+                    data=reading_list_csv(wish),
+                    file_name="reading-list.csv",
+                    mime="text/csv",
+                    icon=":material/download:",
+                )
             cols = st.columns(3)
             for i, book in enumerate(wish):
                 with cols[i % 3], st.container(border=True):
@@ -456,10 +507,20 @@ else:
                     st.caption(book.get("author", ""))
                     if genre_badges(book, n=2):
                         st.markdown(genre_badges(book, n=2))
-                    st.button(
-                        "Remove",
-                        icon=":material/close:",
-                        key=f"wl_rm_{book['id']}",
-                        on_click=react,
-                        args=(book["id"], "skip"),
-                    )
+                    with st.container(horizontal=True):
+                        st.button(
+                            "Read + liked",
+                            icon=":material/check:",
+                            key=f"wl_read_{book['id']}",
+                            help="Mark as read and add to your likes (sharpens recommendations).",
+                            on_click=react,
+                            args=(book["id"], "like"),
+                        )
+                        st.button(
+                            "Remove",
+                            icon=":material/close:",
+                            key=f"wl_rm_{book['id']}",
+                            on_click=react,
+                            args=(book["id"], "skip"),
+                        )
+                    more_like_this(book["id"], key=f"wl_{book['id']}")

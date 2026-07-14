@@ -31,18 +31,21 @@ dependency, used to build embeddings, not to serve.
 
 `streamlit_app.py` is the front end over `app/service.py`:
 
-- **Onboard** — search titles and pick at least three books you love, or **import
-  your reading list** (CSV / TSV / TXT / XLSX, e.g. a Goodreads export): we fuzzy-
-  match each title (author confirms ambiguous ones) to the catalog, seed the
-  matches as likes, and tell you which books we couldn't find.
+- **Onboard** — search titles (or **search by meaning** — "a lonely lighthouse
+  keeper" — via the embeddings) and pick books you love, or **import your reading
+  list** (CSV / TSV / TXT / XLSX, e.g. a Goodreads export): we fuzzy-match each
+  title (author confirms ambiguous ones) and tell you what we couldn't find.
 - **Discover** — swipe one card at a time: **Like**, **Interested** (soft yes →
   saved to your reading list), **Haven't read** (neutral, just skip), or **Pass**
   (dislike). The taste model updates immediately.
-- **For you** — a live grid of best-guess recommendations, **diversified with MMR**
-  so it isn't ten near-identical books (see [Diversity](#diversity-the-relevancediversity-frontier)); **Save** one to your reading list or dismiss it as **Not for me** to refine your taste.
+- **For you** — a live grid of best-guess recommendations, **diversified with MMR +
+  genre calibration** (see [Diversity](#diversity-the-relevancediversity-frontier)),
+  each with a **"why recommended"** line and a **"More like this"** popover; **Save**
+  to your reading list or dismiss as **Not for me**.
 - **Surprise me** — wildcards: books *far* from your usual taste that readers
   like you still rate highly (see [Surprise mode](#surprise-mode)).
-- **Reading list** — everything you marked **Interested**, in one place.
+- **Reading list** — everything you marked **Interested**: mark a book **read +
+  liked**, remove it, get **More like this**, or **export the list as CSV**.
 
 The sidebar carries your **profile**, language/genre/year **filters**, and a live
 taste summary (Liked / Wishlist / Passed / Skipped).
