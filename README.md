@@ -141,28 +141,36 @@ uv run --no-sync python -m eval.compare_paradigms     # content vs CF vs hybrid
 uv run --no-sync python -m eval.cold_start            # the onboarding regime
 ```
 
-### Paradigm comparison (warm users, Recall@10)
+### Paradigm comparison (warm users)
 
-*(Numbers below were measured on an earlier dense-CF catalog snapshot; they
-illustrate the architectural conclusion, which is what drove the design. Re-run
-the commands above for current figures on the 10k top-k catalog.)*
+Measured on the **full 10,000-book sparse top-k catalog** (120 users · hold-out=3
+· eval@10 · 5 splits/user · 600 trials per recommender):
 
-| recommender             | Recall@10 | note |
-|-------------------------|-----------|------|
-| popularity (floor)      | ~0.085    | non-personalized baseline |
-| content: bge-small      | ~0.137    | best content model; beats popularity |
-| collaborative item-item | **~0.297**| ~2× the best content model |
-| hybrid 50/50            | ~0.282    | naive blend dilutes dominant CF |
+| recommender             | Recall@10 | NDCG@10 | MRR    | note |
+|-------------------------|-----------|---------|--------|------|
+| popularity (floor)      | 0.037     | 0.022   | 0.038  | non-personalized baseline |
+| content: hashing        | 0.108     | 0.072   | 0.105  | lexical baseline |
+| content: bge-small      | 0.114     | 0.083   | 0.125  | best content model; edges hashing |
+| collaborative item-item | 0.262     | 0.211   | 0.311  | ~2.3× the best content model |
+| **hybrid (adaptive)**   | **0.270** | **0.218** | **0.318** | best overall |
 
 **For warm users, CF wins decisively** — taste correlations live in co-rating
-patterns, not description text. But content is the *only* thing that works for
-**cold-start**:
+patterns, not description text. At 10k scale the hybrid's edge over pure CF is
+thin (0.270 vs 0.262 Recall@10): once popularity is dense, CF carries almost all
+the signal and content mainly helps the cold tail. (An earlier *dense*-CF 1,000-
+book snapshot showed a wider CF-over-content margin and a naive 50/50 blend that
+*diluted* CF — the sparsity of the small catalog exaggerated CF's dominance; the
+adaptive per-item weight is what keeps the blend from ever hurting.) Content
+remains the *only* thing that works for **cold-start**:
 
 ### Cold-start simulation
 
 `eval.cold_start` marks ~40% of the catalog newly-added (zeroed out of CF and
 popularity; embeddings untouched) and asks whether each paradigm can surface a
-relevant *unrated* book — the onboarding regime.
+relevant *unrated* book — the onboarding regime. *(Absolute numbers below are
+from the earlier dense-CF snapshot; the structural result — hard zeros for CF and
+popularity, content unchanged with or without ratings — is what matters and holds
+regardless of catalog size.)*
 
 | recommender             | Warm books | Cold books (0 ratings) |
 |-------------------------|-----------|------------------------|
