@@ -24,3 +24,8 @@ data/real_cf.npz
 # Co-read fine-tuned encoder — large (~130MB) & regenerable (finetune_coread.py)
 data/coread-encoder/
 data/coread-encoder.ckpt*.pt
+
+# Coverage data
+.coverage
+coverage.xml
+htmlcov/
