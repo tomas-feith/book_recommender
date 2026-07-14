@@ -20,3 +20,7 @@ data/app.db
 
 # Sparse CF matrix — large & regenerable (build_real_dataset.py / refresh.py)
 data/real_cf.npz
+
+# Co-read fine-tuned encoder — large (~130MB) & regenerable (finetune_coread.py)
+data/coread-encoder/
+data/coread-encoder.ckpt*.pt

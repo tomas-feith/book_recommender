@@ -113,7 +113,8 @@ Every book is three aligned artifacts, all keyed by book id:
 | Script | Purpose |
 |--------|---------|
 | `scripts/build_real_dataset.py` | Build the whole dataset from goodbooks-10k: top-`N_BOOKS` (=10000) by rating count, reader shelf-tags as genres, Open Library descriptions, 120 focused eval users, and the sparse CF matrix (from ~53k *non-eval* users, so the harness stays honest). |
-| `scripts/build_embeddings.py`   | Cache `bge-small-en-v1.5` vectors (10000×384) so serving never loads torch. |
+| `scripts/build_embeddings.py`   | Cache the content vectors (10000×384) so serving never loads torch. Uses the **co-read fine-tuned** encoder (`data/coread-encoder`) when present, else stock `bge-small`. |
+| `scripts/finetune_coread.py`    | **Cold-start fine-tune.** Distill EASE's co-read structure INTO the content encoder: build (anchor, positive) pairs from each book's top EASE neighbors and fine-tune `bge-small` with an in-batch contrastive (InfoNCE) objective. Gives unrated books a collaborative-aware embedding EASE can't (see evidence below). Writes `data/coread-encoder`; then re-run `build_embeddings.py`. |
 | `scripts/cf_build.py`           | CF matrix builders, both emitting the same sparse top-k format. Default is **EASE-R** (`ease_cf`: closed-form `B=-P/diag(P)`, `P=(XᵀX+λI)⁻¹`, λ=1000, top-50) — **+35% Recall@10** over the older adjusted-cosine KNN (`sparse_topk_cf`, kept as a fallback). Truncated to ~4MB vs a ~370MB dense matrix, with no ranking loss. |
 | `scripts/fetch_new_books.py`    | Pull genuinely-new books from the **Open Library** search API (by subject, English, recent-year range, ranked by reader count; requires author + cover). Maps to the catalog schema with `ol:`-prefixed ids and dedups against existing ids/titles. |
 | `scripts/enrich_google_books.py`| Fill missing descriptions/categories/covers on existing books via the **Google Books API** (~48% of goodbooks entries lack a description), then re-embed only the changed rows. Needs a free `GOOGLE_BOOKS_API_KEY` (the anonymous quota is a shared, usually-exhausted pool). |
@@ -223,10 +224,32 @@ CF-alone at 0.292): the blend is CF-dominated, so a sharper *content* channel ge
 washed out. Worse, bigger isn't even monotonic — `bge-large` *regresses* below
 `bge-base` on the content arm, so it's strictly dominated (slower **and** less
 accurate). Cost scales the wrong way: 4×–13× the offline embed time and 2×–2.7×
-the vector storage. `bge-base` does give a real **+13% on the content-only arm**,
-which only matters for **cold-start** (where content is the sole signal) — so if
-cold-start quality ever becomes the priority, `bge-base` (not `large`) is the one
-to re-test on `eval.cold_start`. For the warm hybrid we serve, `bge-small` stays.
+the vector storage. A bigger *stock* encoder is the wrong lever — the right one
+for cold-start turned out to be **fine-tuning** the small model on collaborative
+signal (next).
+
+### Collaborative-aware content for cold-start (measured, shipped)
+
+EASE-R is *silent* on an unrated book — an all-zero row, so it can't rank a
+brand-new / never-rated book at all. Content is the only signal there. So we
+**distilled EASE's co-read structure into the content encoder** (`bge-small`,
+in-batch InfoNCE on top-EASE-neighbor pairs; `scripts/finetune_coread.py`), so a
+book lands near its would-be co-read neighbors *from text alone*.
+
+The honest test is **leakage-free**: mark ~40% of books cold (held out of *both*
+the CF matrix and the training pairs), then rank held-out likes by content only.
+
+| held-out target | base bge-small | co-read fine-tuned | Δ |
+|-----------------|----------------|--------------------|---|
+| **cold** (model never trained on these) | 0.147 | **0.166** | **+12%** |
+| warm (contrast — trained on)            | 0.121 | 0.151 | +25% |
+
+The **+12% on cold books the model never saw** is genuine generalization — a
+capability EASE structurally cannot have. (The larger warm gain is the *redundant*
+part: books EASE already handles at serving, so it doesn't count.) The win is real
+but **narrow**: it only helps the content channel, i.e. onboarding and brand-new
+catalog additions; warm users are CF-dominated and unaffected. Serving uses the
+fine-tuned encoder's vectors — same 384-dim, same numpy-only serving path.
 
 ### Eval harness layout
 
