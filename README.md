@@ -84,10 +84,13 @@ Every candidate is scored on two independent axes and blended **per item**:
   books also liked this," independent of whether the descriptions resemble each
   other.
 
-The blend weight is `cf_weight = log(1+pop) / log(1+3000)`, capped at 1: a book
+The blend weight is `cf_weight = log(1+pop) / log(1+500)`, capped at 1: a book
 with many ratings is ranked by CF, a thinly-rated / brand-new book by content.
-This is the direct answer to the cold-start finding below — a *static* 50/50
-blend is wrong in both regimes.
+The reference (500) is tuned for the EASE-R core — measured to beat content at
+*every* popularity tier down to 8 ratings, so the blend leans on CF quickly; a
+brand-new book (pop=0) still gets `cf_weight=0`, i.e. pure content. This is the
+direct answer to the cold-start finding below — a *static* 50/50 blend is wrong
+in both regimes.
 
 ### Surprise mode
 

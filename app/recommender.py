@@ -26,7 +26,10 @@ import numpy as np
 
 from .store import Catalog
 
-POP_REF = 3000.0     # ratings at which we fully trust CF for a book
+POP_REF = 500.0      # ratings at which we ~fully trust CF; tuned for the EASE-R
+                     # core (which beats content at every pop tier >= 8 ratings),
+                     # so the blend leans on CF fast. pop=0 books still get
+                     # cf_weight=0 -> pure content, protecting true cold-start.
 BETA = 0.5           # dislike weight (Rocchio + CF), < 1 because dislikes are noisier
 ALPHA = 0.6          # "interested" weight (Rocchio + CF), < 1: intent is softer than a like
 MMR_LAMBDA = 0.5     # diversity vs relevance in card selection
