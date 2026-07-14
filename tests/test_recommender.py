@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy import sparse
 
-from app.recommender import POP_REF, Recommender
+from app.recommender import POP_REF, Recommender, genre_distribution, kl_calibration
 from app.store import Catalog
 
 
@@ -90,7 +92,75 @@ def _clustered_catalog() -> Catalog:
 def test_mmr_lambda_trades_relevance_for_diversity():
     rec = Recommender(_clustered_catalog())
     reactions = {"seed": "like"}  # taste ~ cluster A; a1 & a2 both maximally relevant
-    focused = {s.book["id"] for s in rec.recommend(reactions, {}, n=2, mmr_lambda=1.0)}
-    diverse = {s.book["id"] for s in rec.recommend(reactions, {}, n=2, mmr_lambda=0.2)}
+    focused = {
+        s.book["id"] for s in rec.recommend(reactions, {}, n=2, mmr_lambda=1.0, cal_lambda=0)
+    }
+    diverse = {
+        s.book["id"] for s in rec.recommend(reactions, {}, n=2, mmr_lambda=0.2, cal_lambda=0)
+    }
     assert "b1" not in focused  # pure relevance keeps both near-identical A books
     assert "b1" in diverse  # diversity swaps the redundant A book for cluster B
+
+
+# ---- calibration primitives -------------------------------------------------
+
+
+def test_genre_distribution_splits_mass_and_normalizes():
+    d = genre_distribution([["a", "b"], ["a"]])  # book1: a,b half each; book2: a
+    assert math.isclose(d["a"], 0.75) and math.isclose(d["b"], 0.25)
+
+
+def test_genre_distribution_weights_and_empty():
+    d = genre_distribution([["a"], ["b"]], weights=[1.0, 3.0])
+    assert math.isclose(d["a"], 0.25) and math.isclose(d["b"], 0.75)
+    assert genre_distribution([[], []]) == {}
+
+
+def test_kl_calibration_zero_when_matched_positive_when_not():
+    assert kl_calibration({"a": 0.5, "b": 0.5}, {"a": 0.5, "b": 0.5}) == 0.0
+    off = kl_calibration({"a": 0.5, "b": 0.5}, {"a": 1.0})
+    assert off > 0.0
+
+
+def _two_taste_catalog() -> Catalog:
+    """User likes genre a AND b; candidates: 3 highly-relevant 'a', 2 'b'."""
+    rows = [
+        ("as", "W0", "a", [1.0, 0.0]),  # liked seed, genre a
+        ("bs", "W1", "b", [0.0, 1.0]),  # liked seed, genre b
+        ("a1", "W2", "a", [0.8, 0.6]),  # a candidates: closest to the taste centroid
+        ("a2", "W3", "a", [0.8, 0.6]),
+        ("a3", "W4", "a", [0.8, 0.6]),
+        ("b1", "W5", "b", [0.0, 1.0]),  # b candidates: relevant but less so
+        ("b2", "W6", "b", [0.0, 1.0]),
+    ]
+    books = [
+        {
+            "id": bid,
+            "title": bid,
+            "author": auth,
+            "subjects": [g],
+            "language": "en",
+            "year": 2000,
+            "description": "",
+        }
+        for bid, auth, g, _ in rows
+    ]
+    emb = np.array([v for *_, v in rows], dtype=np.float32)
+    sim = sparse.csr_matrix((len(rows), len(rows)), dtype=np.float32)
+    pop = np.zeros(len(rows), dtype=np.float32)
+    return Catalog(books, emb, sim, pop, {b["id"]: i for i, b in enumerate(books)})
+
+
+def _n_genre_b(scored):
+    return sum(1 for s in scored if s.book["subjects"] == ["b"])
+
+
+def test_calibration_covers_a_minority_taste():
+    rec = Recommender(_two_taste_catalog())
+    reactions = {"as": "like", "bs": "like"}  # taste is 50% a, 50% b
+    # Pure relevance floods the list with the higher-scoring 'a' cluster...
+    uncalibrated = rec.recommend(reactions, {}, n=3, mmr_lambda=1.0, cal_lambda=0.0)
+    assert _n_genre_b(uncalibrated) == 0
+    # ...strong calibration overrides relevance to cover the user's 'b' taste.
+    calibrated = rec.recommend(reactions, {}, n=3, mmr_lambda=1.0, cal_lambda=5.0)
+    assert _n_genre_b(calibrated) >= 1

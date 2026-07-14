@@ -18,6 +18,7 @@ Serving needs only numpy — embeddings are precomputed.
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -35,11 +36,49 @@ ALPHA = 0.6  # "interested" weight (Rocchio + CF), < 1: intent is softer than a 
 MMR_LAMBDA = 0.5  # diversity vs relevance in MMR selection (1.0 = pure relevance)
 EXPLORE_FRAC = 0.25  # share of swipe cards drawn from beyond the top band
 REC_POOL_MULT = 20  # "For You": diversify within the top REC_POOL_MULT*n candidates
+CAL_LAMBDA = 0.4  # "For You": genre-calibration strength (0 = off); see finetune notes
+CAL_SMOOTH = 0.01  # KL smoothing so an absent list-genre doesn't blow up
 
 
 def _standardize(x: np.ndarray) -> np.ndarray:
     std = x.std()
     return (x - x.mean()) / std if std > 1e-9 else x - x.mean()
+
+
+def genre_distribution(
+    subject_lists: Sequence[Sequence[str]], weights: Sequence[float] | None = None
+) -> dict[str, float]:
+    """Normalized genre distribution over a set of books' subject lists.
+
+    Each book splits one unit of mass equally across its own subjects (so a book
+    tagged 3 genres contributes 1/3 to each), optionally scaled by ``weights``.
+    Books with no subjects contribute nothing. Returns {} if there's no signal.
+    """
+    counts: dict[str, float] = {}
+    for k, subs in enumerate(subject_lists):
+        if not subs:
+            continue
+        w = 1.0 if weights is None else weights[k]
+        for s in subs:
+            counts[s] = counts.get(s, 0.0) + w / len(subs)
+    total = sum(counts.values())
+    return {g: v / total for g, v in counts.items()} if total else {}
+
+
+def kl_calibration(
+    target: dict[str, float], q: dict[str, float], alpha: float = CAL_SMOOTH
+) -> float:
+    """KL(target || smoothed q) -- Steck's list-miscalibration. 0 = perfectly matched.
+
+    ``q`` is smoothed toward ``target`` so a genre the list hasn't covered yet is
+    penalized finitely rather than infinitely.
+    """
+    kl = 0.0
+    for g, p in target.items():
+        qg = (1 - alpha) * q.get(g, 0.0) + alpha * p
+        if p > 0 and qg > 0:
+            kl += p * math.log(p / qg)
+    return kl
 
 
 @dataclass
@@ -149,13 +188,16 @@ class Recommender:
         n: int = 10,
         per_author: int = 2,
         mmr_lambda: float = MMR_LAMBDA,
+        cal_lambda: float = CAL_LAMBDA,
     ) -> list[Scored]:
         """Best-guess recommendations for a 'For You' list.
 
         Retrieves the top ``REC_POOL_MULT * n`` by relevance, then selects the
-        final ``n`` with **MMR** so the list is spread out (not ten near-identical
-        fantasy novels), capped at ``per_author`` books per author. ``mmr_lambda``
-        trades relevance (1.0) against diversity (toward 0).
+        final ``n`` with **MMR + genre calibration** so the list is spread out (not
+        ten near-identical fantasy novels) *and* mirrors your taste mix (your
+        sci-fi and your romance in proportion, not all of the majority genre),
+        capped at ``per_author`` books per author. ``mmr_lambda`` trades relevance
+        vs redundancy; ``cal_lambda`` sets how hard genres are matched (0 = off).
         """
         liked, disliked, interested = self._split(reactions)
         cand = np.where(self._candidate_mask(reactions, filters))[0]
@@ -165,7 +207,14 @@ class Recommender:
         order = cand[np.argsort(-scores)]
         pool = order[: max(REC_POOL_MULT * n, n)]
         picks = self._mmr(
-            pool, liked, disliked, interested, n, lam=mmr_lambda, per_author=per_author
+            pool,
+            liked,
+            disliked,
+            interested,
+            n,
+            lam=mmr_lambda,
+            per_author=per_author,
+            cal_lambda=cal_lambda,
         )
         return self._as_scored(picks, liked, disliked, interested)
 
@@ -268,6 +317,16 @@ class Recommender:
         combined = 0.5 * np.arange(len(order)) + 0.5 * np.argsort(pop_rank)
         return order[np.argsort(combined)]
 
+    def _book_genre_mass(self, i: int) -> dict[str, float]:
+        subs = self.cat.books[i].get("subjects", []) or []
+        return {s: 1.0 / len(subs) for s in subs} if subs else {}
+
+    def _genre_target(self, liked, interested) -> dict[str, float]:
+        """The user's taste genre distribution (likes full weight, interest ALPHA)."""
+        subs = [self.cat.books[i].get("subjects", []) for i in list(liked) + list(interested)]
+        weights = [1.0] * len(liked) + [ALPHA] * len(interested)
+        return genre_distribution(subs, weights)
+
     def _mmr(
         self,
         pool,
@@ -277,20 +336,26 @@ class Recommender:
         k: int,
         lam: float = MMR_LAMBDA,
         per_author: int = 1,
+        cal_lambda: float = 0.0,
     ) -> list[int]:
-        """Maximal-marginal-relevance select.
+        """Greedy list selection: relevance − redundancy (MMR) − genre miscalibration.
 
-        Greedily picks the candidate maximizing ``lam * relevance - (1 - lam) *
-        max-similarity-to-already-picked`` (``lam`` toward 0 = more diverse), with
-        at most ``per_author`` books per author so one saga can't flood the list.
-        This is the tractable approximation to "pick the k with the widest spread";
-        exact max-dispersion is NP-hard.
+        Picks the candidate maximizing ``lam * relevance - (1 - lam) *
+        max-similarity-to-already-picked - cal_lambda * KL(taste ‖ list genres)``
+        (``lam`` toward 0 = more diverse; ``cal_lambda`` > 0 pulls the list's genre
+        mix toward the user's, so a multi-taste reader sees each taste in
+        proportion). At most ``per_author`` books per author. ``cal_lambda=0``
+        recovers plain MMR. Exact set-diversity is NP-hard; this greedy is the
+        standard tractable approximation.
         """
         pool = list(pool)
         if not pool:
             return []
         rel_scores = self._scores(liked, disliked, interested, np.array(pool))
         rel = {p: rel_scores[i] for i, p in enumerate(pool)}
+        target = self._genre_target(liked, interested) if cal_lambda > 0 else {}
+        sel_mass: dict[str, float] = {}  # running (unnormalized) genre mass of `selected`
+        sel_total = 0.0
         selected: list[int] = []
         author_count: dict[str, int] = {}
         while pool and len(selected) < k:
@@ -300,11 +365,17 @@ class Recommender:
                 if author and author_count.get(author, 0) >= per_author:
                     continue
                 # Diversity = similarity to the most-similar already-picked book.
-                if selected:
-                    div = float(np.max(self.cat.emb[p] @ self.cat.emb[selected].T))
-                else:
-                    div = 0.0
+                div = float(np.max(self.cat.emb[p] @ self.cat.emb[selected].T)) if selected else 0.0
                 val = lam * rel[p] - (1 - lam) * div
+                if target:  # genre-calibration penalty for the list-with-p
+                    pm = self._book_genre_mass(p)
+                    tot = sel_total + sum(pm.values())
+                    if tot > 0:
+                        q = {
+                            g: (sel_mass.get(g, 0.0) + pm.get(g, 0.0)) / tot
+                            for g in set(sel_mass) | set(pm)
+                        }
+                        val -= cal_lambda * kl_calibration(target, q)
                 if val > best_val:
                     best, best_val = p, val
             if best is None:  # every author cap hit; relax and take the most relevant
@@ -313,6 +384,9 @@ class Recommender:
             author = self._primary_author(best)
             if author:
                 author_count[author] = author_count.get(author, 0) + 1
+            for g, m in self._book_genre_mass(best).items():  # fold into running mass
+                sel_mass[g] = sel_mass.get(g, 0.0) + m
+                sel_total += m
             pool.remove(best)
         return selected
 

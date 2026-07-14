@@ -264,31 +264,40 @@ fine-tuned encoder's vectors — same 384-dim, same numpy-only serving path.
 
 ### Diversity: the relevance↔diversity frontier
 
-You don't want ten near-identical fantasy novels (or all seven Harry Potters). The
-serving lists select with **MMR** — retrieve the top `REC_POOL_MULT·n` by relevance,
-then greedily pick the ones that maximize `λ·relevance − (1−λ)·max-similarity-to-
-already-picked`, capped per author so one saga can't flood the list. (Exact
-"maximize the spread of the chosen set" is NP-hard; greedy MMR is the standard
-tractable approximation. A single-author series is collapsed by the author cap;
-near-duplicates across authors by the similarity penalty.)
+You don't want ten near-identical fantasy novels (or all seven Harry Potters), and
+if you like fantasy *and* romance you want both — in proportion. The "For You" list
+is selected greedily to maximize, per pick,
 
-`eval.diversity` sweeps λ over the real profiles and measures Recall@10 against
-three beyond-accuracy metrics — **intra-list distance** (ILD), **genre entropy**,
-and catalog **coverage**:
+    λ · relevance − (1 − λ) · max-similarity-to-already-picked − cal · KL(taste ‖ list-genres)
 
-| `mmr_lambda` | Recall@10 | ILD | genre-H | coverage |
-|:---:|:---:|:---:|:---:|:---:|
-| 1.0 (pure relevance) | 0.341 | 0.500 | 4.09 | 0.052 |
-| 0.7 | **0.342** | 0.506 | 4.11 | 0.052 |
-| **0.5 (default)** | 0.338 | 0.514 | 4.14 | 0.053 |
-| 0.3 | 0.333 | 0.533 | 4.22 | 0.055 |
+over the top `REC_POOL_MULT·n` candidates, capped per author. The three terms:
+**relevance**, an **MMR** redundancy penalty (`mmr_lambda`; exact set-diversity is
+NP-hard so greedy is the standard approximation), and **genre calibration** (Steck):
+`cal_lambda` pulls the list's genre mix toward the user's taste mix via KL
+divergence, so a minority taste isn't drowned out by the majority one. A
+single-author saga is collapsed by the author cap; cross-author near-duplicates by
+the similarity penalty; taste *coverage* by calibration.
 
-**Diversity is nearly free here:** going from pure relevance to λ=0.3 costs ~2%
-Recall for +7% ILD and higher genre spread/coverage, and λ=0.7 is a small free
-lunch. The default `MMR_LAMBDA=0.5` sits on the cheap part of the curve; the knob
-is a natural "focused ↔ eclectic" control. (For *multi-taste* coverage — showing
-your sci-fi *and* your romance in proportion — calibrated recommendations are the
-logical next step; noted, not yet built.)
+`eval.diversity` sweeps both knobs over the real profiles, measuring Recall@10
+against **intra-list distance** (ILD), **genre entropy**, **miscalibration KL**
+(list vs. taste genre mix; lower = better), and catalog **coverage**:
+
+| `mmr` | `cal` | Recall@10 | ILD | genre-H | miscalKL | coverage |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 1.0 | 0.0 | 0.341 | 0.500 | 4.09 | 1.550 | 0.052 |
+| 0.5 | 0.0 | 0.338 | 0.514 | 4.14 | 1.515 | 0.053 |
+| **0.5** | **0.4** | **0.341** | 0.517 | 4.16 | **1.454** | 0.053 |
+| 0.5 | 0.8 | 0.338 | 0.523 | 4.19 | 1.388 | 0.054 |
+
+**Both diversity and calibration are ~free here.** Dropping `mmr` to 0.3 costs ~2%
+Recall for +7% ILD; adding `cal=0.4` *lowers* miscalibration (1.515 → 1.454) while
+nudging Recall *up*. Defaults `MMR_LAMBDA=0.5`, `CAL_LAMBDA=0.4` sit on the cheap
+part of both curves; `mmr_lambda` is a natural "focused ↔ eclectic" control.
+
+> Calibration is the answer to the *multi-taste* problem a single Rocchio centroid
+> can't solve at scoring time (per-cluster profiles were tried and lost — see below):
+> instead of splitting the taste vector, we let scoring stay pooled and fix the
+> genre *balance* at list-assembly time. Cheaper, and it measurably works.
 
 ### Eval harness layout
 
