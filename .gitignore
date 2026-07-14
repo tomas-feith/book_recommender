@@ -12,6 +12,9 @@ venv/
 # Dataset build cache (downloaded source data)
 .cache/
 
+# Secrets
+.env
+
 # User state — per-user swipe log, regenerated at runtime
 data/app.db
 
