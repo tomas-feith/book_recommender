@@ -97,7 +97,7 @@ def _app_ratings(order: set) -> Dict[str, Dict[str, float]]:
 
 def rebuild_cf(data_dir: Path = DATA) -> None:
     from app.store import save_cf
-    from cf_build import sparse_topk_cf
+    from cf_build import ease_cf
 
     order = _catalog_order()
     order_set = set(order)
@@ -115,10 +115,10 @@ def rebuild_cf(data_dir: Path = DATA) -> None:
     for uid, ratings in app.items():
         combined[f"app:{uid}"] = dict(ratings)
 
-    sim, pop = sparse_topk_cf(order, combined)
+    sim, pop = ease_cf(order, combined)
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
     n_app = sum(1 for k in combined if k.startswith("app:"))
-    print(f"Rebuilt sparse CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) from "
+    print(f"Rebuilt EASE-R CF ({sim.shape[0]}x{sim.shape[1]}, {sim.nnz} nnz) from "
           f"{len(combined)} users ({n_app} from app swipes) -> {data_dir / 'real_cf.npz'}")
 
 

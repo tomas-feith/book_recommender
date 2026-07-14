@@ -15,6 +15,8 @@ import random
 from pathlib import Path
 from typing import Dict, List
 
+import numpy as np
+
 from .data import load_books, load_profiles
 from .embedders import HashingEmbedder, SentenceTransformerEmbedder
 from .metrics import mrr, ndcg_at_k, recall_at_k
@@ -29,6 +31,28 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 K_HOLDOUT = 3
 K_EVAL = 10
 SEEDS = list(range(5))
+
+
+def cached_content(books: List[dict], data_dir: Path = DATA):
+    """A content recommender backed by the precomputed serving embeddings.
+
+    ``data/real_embeddings.npz`` already holds the bge-small vectors for the whole
+    catalog, so we reuse them instead of re-embedding 10k books (~15 min of CPU)
+    every eval. Returns None if the cache is absent (fall back to live encoding).
+    """
+    path = data_dir / "real_embeddings.npz"
+    if not path.exists():
+        return None
+    z = np.load(path, allow_pickle=True)
+    pos = {b: i for i, b in enumerate(z["ids"].astype(str).tolist())}
+    if not all(b["id"] in pos for b in books):
+        return None
+    emb = z["emb"].astype(np.float32)[[pos[b["id"]] for b in books]]
+    rec = EmbeddingRecommender(embedder=None, strategy="rocchio")
+    rec.name = f"content:{str(z['model'])}/rocchio (cached)"
+    rec._cat = emb
+    rec.prepare = lambda _books: None       # already prepared; don't re-embed
+    return rec
 
 
 def evaluate(rec, books, profiles) -> Dict[str, float]:
@@ -64,10 +88,16 @@ def main() -> None:
     profiles = load_profiles(DATA / "real_profiles.json")
     cf_npz = DATA / "real_cf.npz"
 
-    content = EmbeddingRecommender(
+    # Reuse the cached serving embeddings when present (fast, torch-free); else
+    # embed live. Either way this is the same bge-small content model.
+    content = cached_content(books) or EmbeddingRecommender(
         SentenceTransformerEmbedder("BAAI/bge-small-en-v1.5"), strategy="rocchio"
     )
+    # The CF matrix in real_cf.npz is EASE-R by default (scripts/cf_build.py);
+    # this arm is therefore the EASE regression check -- expect ~0.35 Recall@10,
+    # well above the old adjusted-cosine KNN's ~0.26.
     cf = ItemItemCFRecommender(cf_npz)
+    cf.name = "collaborative:EASE-R"
 
     recommenders = [
         PopularityRecommender(cf_npz),

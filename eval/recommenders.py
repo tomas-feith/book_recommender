@@ -87,11 +87,13 @@ class ItemItemCFRecommender(_NpzBacked):
         self.sim = np.asarray(sim[self._perm][:, self._perm].todense()).astype(np.float32)
 
     def score(self, seed, dislikes, cands) -> np.ndarray:
+        # Slice the (few) seed/dislike columns once and sum, then gather the
+        # candidate rows -- far cheaper than double-fancy-indexing sim[cands][:,seed].
         cands = np.asarray(cands)
-        s = self.sim[cands][:, list(seed)].sum(axis=1)
+        s = self.sim[:, list(seed)].sum(axis=1)
         if len(dislikes):
-            s = s - self.beta * self.sim[cands][:, list(dislikes)].sum(axis=1)
-        return s
+            s = s - self.beta * self.sim[:, list(dislikes)].sum(axis=1)
+        return s[cands]
 
     def rank(self, seed, dislikes, cands) -> List[int]:
         return _rank_from_score(self.score(seed, dislikes, cands), cands)

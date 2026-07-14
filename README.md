@@ -16,7 +16,7 @@ both have wheels there):
 
 ```bash
 uv sync                                          # create the venv, install deps
-uv run --no-sync python scripts/build_real_dataset.py   # generate data/real_cf.npz (gitignored, ~10MB)
+uv run --no-sync python scripts/build_real_dataset.py   # generate data/real_cf.npz (gitignored, ~3MB)
 uv run streamlit run streamlit_app.py            # the app at http://localhost:8501
 ```
 
@@ -80,8 +80,9 @@ Every candidate is scored on two independent axes and blended **per item**:
 
 - **Content** — cosine of the candidate to your Rocchio taste centroid
   (liked + `α`·interested − `β`·disliked embeddings).
-- **CF** — item-item collaborative signal: "readers who liked your books also
-  liked this," independent of whether the descriptions resemble each other.
+- **CF** — item-item collaborative signal (**EASE-R**): "readers who liked your
+  books also liked this," independent of whether the descriptions resemble each
+  other.
 
 The blend weight is `cf_weight = log(1+pop) / log(1+3000)`, capped at 1: a book
 with many ratings is ranked by CF, a thinly-rated / brand-new book by content.
@@ -108,7 +109,7 @@ Every book is three aligned artifacts, all keyed by book id:
 |--------|---------|
 | `scripts/build_real_dataset.py` | Build the whole dataset from goodbooks-10k: top-`N_BOOKS` (=10000) by rating count, reader shelf-tags as genres, Open Library descriptions, 120 focused eval users, and the sparse CF matrix (from ~53k *non-eval* users, so the harness stays honest). |
 | `scripts/build_embeddings.py`   | Cache `bge-small-en-v1.5` vectors (10000×384) so serving never loads torch. |
-| `scripts/cf_build.py`           | Shared **sparse top-k** CF builder (adjusted-cosine, k=100, block-wise). A dense 10k×10k matrix would be ~370MB; this is ~7MB with no ranking loss. |
+| `scripts/cf_build.py`           | CF matrix builders, both emitting the same sparse top-k format. Default is **EASE-R** (`ease_cf`: closed-form `B=-P/diag(P)`, `P=(XᵀX+λI)⁻¹`, λ=1000, top-50) — **+35% Recall@10** over the older adjusted-cosine KNN (`sparse_topk_cf`, kept as a fallback). Truncated to ~4MB vs a ~370MB dense matrix, with no ranking loss. |
 | `scripts/fetch_new_books.py`    | Pull genuinely-new books from the **Open Library** search API (by subject, English, recent-year range, ranked by reader count; requires author + cover). Maps to the catalog schema with `ol:`-prefixed ids and dedups against existing ids/titles. |
 | `scripts/enrich_google_books.py`| Fill missing descriptions/categories/covers on existing books via the **Google Books API** (~48% of goodbooks entries lack a description), then re-embed only the changed rows. Needs a free `GOOGLE_BOOKS_API_KEY` (the anonymous quota is a shared, usually-exhausted pool). |
 | `scripts/fetch_google_books.py` | Add NEW books from the **Google Books API** by subject (`gb:` ids), deduped against the catalog; writes a JSON list for `add_books`/`refresh --add`. The source-side companion to the enricher. Same API key via `.env`. |
@@ -149,19 +150,20 @@ Measured on the **full 10,000-book sparse top-k catalog** (120 users · hold-out
 | recommender             | Recall@10 | NDCG@10 | MRR    | note |
 |-------------------------|-----------|---------|--------|------|
 | popularity (floor)      | 0.037     | 0.022   | 0.038  | non-personalized baseline |
-| content: hashing        | 0.108     | 0.072   | 0.105  | lexical baseline |
+| content: hashing        | 0.107     | 0.074   | 0.111  | lexical baseline |
 | content: bge-small      | 0.114     | 0.083   | 0.125  | best content model; edges hashing |
-| collaborative item-item | 0.262     | 0.211   | 0.311  | ~2.3× the best content model |
-| **hybrid (adaptive)**   | **0.270** | **0.218** | **0.318** | best overall |
+| **collaborative: EASE-R** | **0.351** | 0.279 | 0.380 | closed-form item-item; the CF core |
+| hybrid (static 50/50)   | 0.344     | 0.280   | 0.388  | content slightly *dilutes* strong CF |
 
 **For warm users, CF wins decisively** — taste correlations live in co-rating
-patterns, not description text. At 10k scale the hybrid's edge over pure CF is
-thin (0.270 vs 0.262 Recall@10): once popularity is dense, CF carries almost all
-the signal and content mainly helps the cold tail. (An earlier *dense*-CF 1,000-
-book snapshot showed a wider CF-over-content margin and a naive 50/50 blend that
-*diluted* CF — the sparsity of the small catalog exaggerated CF's dominance; the
-adaptive per-item weight is what keeps the blend from ever hurting.) Content
-remains the *only* thing that works for **cold-start**:
+patterns, not description text. The CF core is **EASE-R** (a closed-form
+regularized item-item auto-encoder), which measured **+35% Recall@10 over the
+adjusted-cosine KNN it replaced** (0.262 → 0.351; see git history for the
+ablation). It's so strong that for *warm* users content slightly dilutes it — but
+content is still the **only** signal for **cold-start**, so the served recommender
+keeps the adaptive per-item blend (swapping the KNN core for EASE lifted the
+served adaptive hybrid 0.275 → 0.333). Content remains the *only* thing that works
+when there are no ratings at all:
 
 ### Cold-start simulation
 
@@ -175,7 +177,7 @@ regardless of catalog size.)*
 | recommender             | Warm books | Cold books (0 ratings) |
 |-------------------------|-----------|------------------------|
 | popularity              | ~0.085    | **0.000** |
-| collaborative item-item | ~0.297    | **0.000** |
+| collaborative (item-item/EASE) | ~0.30 | **0.000** |
 | content: bge-small      | ~0.137    | **~0.142** |
 | hybrid 50/50            | ~0.282    | ~0.064 |
 
