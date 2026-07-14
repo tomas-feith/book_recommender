@@ -20,7 +20,7 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -75,6 +75,26 @@ class Catalog:
     sim: sparse.csr_matrix  # (N, N) item-item CF (sparse top-k), 0 diagonal
     pop: np.ndarray  # (N,) rating counts (CF-warmth proxy)
     id_to_idx: dict[str, int]
+    # Precomputed columnar filter indices (built once), so filter_mask is vectorized
+    # numpy instead of a per-book Python loop on every recommendation.
+    _lang: np.ndarray = field(init=False, repr=False)
+    _year: np.ndarray = field(init=False, repr=False)
+    _genre_mask: dict[str, np.ndarray] = field(init=False, repr=False, default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._lang = np.array([(b.get("language") or "").lower() for b in self.books], dtype=object)
+        self._year = np.array(
+            [b["year"] if b.get("year") is not None else np.nan for b in self.books],
+            dtype=np.float64,
+        )
+        gm: dict[str, np.ndarray] = {}
+        for i, b in enumerate(self.books):
+            for s in b.get("subjects", []) or []:
+                arr = gm.get(s.lower())
+                if arr is None:
+                    arr = gm[s.lower()] = np.zeros(len(self.books), dtype=bool)
+                arr[i] = True
+        self._genre_mask = gm
 
     @classmethod
     def load(cls, data_dir: Path = DATA) -> Catalog:
@@ -117,21 +137,24 @@ class Catalog:
         """Boolean mask over the catalog for the given hard filters.
 
         These are structured-metadata filters applied AROUND vector search --
-        never baked into the embedding.
+        never baked into the embedding. Vectorized via the precomputed columnar
+        indices, so the loops here are over the (small) requested filter values,
+        never over the catalog.
         """
         mask = np.ones(len(self), dtype=bool)
-        genre_set = {g.lower() for g in genres} if genres else None
-        lang_set = {lang.lower() for lang in languages} if languages else None
-        for i, b in enumerate(self.books):
-            if lang_set and (b.get("language", "") or "").lower() not in lang_set:
-                mask[i] = False
-            if genre_set and not (genre_set & {s.lower() for s in b.get("subjects", [])}):
-                mask[i] = False
-            yr = b.get("year")
-            if year_min is not None and (yr is None or yr < year_min):
-                mask[i] = False
-            if year_max is not None and (yr is None or yr > year_max):
-                mask[i] = False
+        if languages:
+            mask &= np.isin(self._lang, [lang.lower() for lang in languages])
+        if genres:
+            gmask = np.zeros(len(self), dtype=bool)
+            for g in genres:
+                arr = self._genre_mask.get(g.lower())
+                if arr is not None:
+                    gmask |= arr
+            mask &= gmask
+        if year_min is not None:  # NaN (missing year) compares False -> excluded, as before
+            mask &= self._year >= year_min
+        if year_max is not None:
+            mask &= self._year <= year_max
         return mask
 
     def all_genres(self) -> list[str]:

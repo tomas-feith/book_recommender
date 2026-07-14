@@ -352,22 +352,27 @@ class Recommender:
         if not pool:
             return []
         rel_scores = self._scores(liked, disliked, interested, np.array(pool))
-        rel = {p: rel_scores[i] for i, p in enumerate(pool)}
+        rel = {p: float(rel_scores[i]) for i, p in enumerate(pool)}
         target = self._genre_target(liked, interested) if cal_lambda > 0 else {}
         sel_mass: dict[str, float] = {}  # running (unnormalized) genre mass of `selected`
         sel_total = 0.0
         selected: list[int] = []
         author_count: dict[str, int] = {}
         while pool and len(selected) < k:
-            best, best_val = None, -1e18
-            for p in pool:
+            # Redundancy for ALL remaining candidates in one matmul (candidates x picked).
+            rel_v = np.fromiter((rel[p] for p in pool), dtype=np.float64, count=len(pool))
+            if selected:
+                div_v = (self.cat.emb[pool] @ self.cat.emb[selected].T).max(axis=1)
+            else:
+                div_v = np.zeros(len(pool))
+            base = lam * rel_v - (1 - lam) * div_v
+            best_idx, best_val = -1, -1e18
+            for idx, p in enumerate(pool):
                 author = self._primary_author(p)
                 if author and author_count.get(author, 0) >= per_author:
                     continue
-                # Diversity = similarity to the most-similar already-picked book.
-                div = float(np.max(self.cat.emb[p] @ self.cat.emb[selected].T)) if selected else 0.0
-                val = lam * rel[p] - (1 - lam) * div
-                if target:  # genre-calibration penalty for the list-with-p
+                val = float(base[idx])
+                if target:  # genre-calibration penalty for the list-with-p (cheap, per-item)
                     pm = self._book_genre_mass(p)
                     tot = sel_total + sum(pm.values())
                     if tot > 0:
@@ -377,9 +382,10 @@ class Recommender:
                         }
                         val -= cal_lambda * kl_calibration(target, q)
                 if val > best_val:
-                    best, best_val = p, val
-            if best is None:  # every author cap hit; relax and take the most relevant
-                best = max(pool, key=lambda p: rel[p])
+                    best_idx, best_val = idx, val
+            if best_idx < 0:  # every author cap hit; relax and take the most relevant
+                best_idx = int(np.argmax(rel_v))
+            best = pool[best_idx]
             selected.append(best)
             author = self._primary_author(best)
             if author:
@@ -387,7 +393,7 @@ class Recommender:
             for g, m in self._book_genre_mass(best).items():  # fold into running mass
                 sel_mass[g] = sel_mass.get(g, 0.0) + m
                 sel_total += m
-            pool.remove(best)
+            pool.pop(best_idx)
         return selected
 
     def _explore(self, order, taken, k, rng) -> list[int]:
