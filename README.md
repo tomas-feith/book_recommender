@@ -31,10 +31,11 @@ dependency, used to build embeddings, not to serve.
 
 `streamlit_app.py` is the front end over `app/service.py`:
 
-- **Onboard** — search titles (or **search by meaning** — "a lonely lighthouse
-  keeper" — via the embeddings) and pick books you love, or **import your reading
-  list** (CSV / TSV / TXT / XLSX, e.g. a Goodreads export): we fuzzy-match each
-  title (author confirms ambiguous ones) and tell you what we couldn't find.
+- **Onboard** — search by **title or author** (translated works resolve by their
+  English name *or* original, e.g. *The Three-Body Problem* / `三体`), or **search
+  by meaning** ("a lonely lighthouse keeper") via the embeddings, or **import your
+  reading list** (CSV / TSV / TXT / XLSX, e.g. a Goodreads export): we fuzzy-match
+  each title (author confirms ambiguous ones) and tell you what we couldn't find.
 - **Discover** — swipe one card at a time: **Like**, **Interested** (soft yes →
   saved to your reading list), **Haven't read** (neutral, just skip), or **Pass**
   (dislike). The taste model updates immediately.
@@ -78,7 +79,7 @@ headings (Fraunces) over an Inter body, pill buttons.
 |--------|------|
 | `app/store.py`       | `Catalog` (books + fp16 embeddings + **sparse top-k CF matrix** + popularity + **vectorized metadata filters**, one aligned index) and `SwipeStore` (users/swipes/profiles in SQLite). Split so the store can move to Postgres+pgvector without touching the rest. |
 | `app/recommender.py` | Adaptive hybrid: Rocchio profile, content + CF scores, **per-item weight by rating count** (`cf_weight`); list assembly with **MMR + genre calibration**, exploit/explore, `surprise()`, `similar()` ("more like this"), and per-pick explanations. |
-| `app/search.py`      | Fuzzy title resolution for the seed step. |
+| `app/search.py`      | Fuzzy **title + author** resolution for the seed step: English display titles with the original-language name (`三体`) kept as a searchable alias, and a popularity tiebreak so the canonical edition surfaces first. |
 | `app/library.py`     | Parse an uploaded reading list (CSV/TSV/TXT/XLSX) into `(title, author)` entries. |
 | `app/service.py`     | `BookRecommenderService`: users/profiles, `seed`, `next_cards`, `swipe`, `recommendations`, `surprises`, `wishlist`, `semantic_search`, `similar_books`, `import_library`, filters. The seam a UI/HTTP layer sits on. |
 | `app/demo.py`        | Scripted end-to-end session (seed → recommend → swipe → adapt → filter). |

@@ -21,6 +21,7 @@ import csv
 import io
 import json
 import os
+import re
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -99,6 +100,19 @@ def load_csv(text: str):
 def pad_isbn10(raw: str) -> str:
     raw = (raw or "").strip()
     return raw.zfill(10) if raw and raw.upper().isalnum() else ""
+
+
+_SERIES_SUFFIX = re.compile(r"\s*\([^)]*#\s*\d+[^)]*\)\s*$")
+_TITLE_WORD = re.compile(r"[a-z0-9]+")
+
+
+def clean_title(title: str) -> str:
+    """Drop a trailing series suffix like ' (Remembrance of Earth's Past, #1)'."""
+    return _SERIES_SUFFIX.sub("", (title or "").strip()).strip()
+
+
+def _norm(s: str) -> str:
+    return " ".join(_TITLE_WORD.findall((s or "").lower()))
 
 
 def ol_description(isbn: str) -> str | None:
@@ -199,20 +213,24 @@ def build_books():
             year = int(float(year))
         except ValueError:
             year = None
-        books.append(
-            {
-                "id": r["book_id"],
-                "title": r.get("original_title") or r.get("title") or "",
-                "author": r.get("authors", ""),
-                "subjects": subjects_for(r["goodreads_book_id"]),
-                "language": lang_map.get(
-                    r.get("language_code", ""), r.get("language_code") or "en"
-                ),
-                "year": year,
-                "image": r.get("image_url", ""),
-                "isbn10": pad_isbn10(r.get("isbn", "")),
-            }
-        )
+        # Prefer the English edition title (goodbooks' original_title is the
+        # ORIGINAL-language name for translated works, so e.g. '三体' instead of
+        # 'The Three-Body Problem' -- unsearchable by the name readers know).
+        title = clean_title(r.get("title") or r.get("original_title") or "")
+        orig = (r.get("original_title") or "").strip()
+        book = {
+            "id": r["book_id"],
+            "title": title,
+            "author": r.get("authors", ""),
+            "subjects": subjects_for(r["goodreads_book_id"]),
+            "language": lang_map.get(r.get("language_code", ""), r.get("language_code") or "en"),
+            "year": year,
+            "image": r.get("image_url", ""),
+            "isbn10": pad_isbn10(r.get("isbn", "")),
+        }
+        if orig and _norm(orig) != _norm(title):  # keep the original as a search alias
+            book["orig_title"] = orig
+        books.append(book)
 
     enrich_descriptions(books)
     for b in books:
