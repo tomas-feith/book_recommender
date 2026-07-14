@@ -199,6 +199,28 @@ and overtake it. Your real catalog behaves like the `no-subjects` column, so
 trust it when picking a model: `bge-small-en-v1.5` > `MiniLM-L6` > lexical, and
 Rocchio helps once the keyword crutch is gone.
 
+### Does a *bigger* embedding model help? (measured: no)
+
+`bge-small` (384-dim) is the serving model. We tested whether scaling up the
+encoder buys anything, on a fixed shared candidate pool (same pool for every arm,
+so cross-model deltas are apples-to-apples):
+
+| model      | dim  | content R@10 | **hybrid R@10** | full-10k embed (6-thread CPU) |
+|------------|------|--------------|-----------------|-------------------------------|
+| bge-small  | 384  | 0.132        | **0.302**       | ~15 min                       |
+| bge-base   | 768  | **0.149**    | 0.297           | ~57 min                       |
+| bge-large  | 1024 | 0.140        | 0.302           | ~196 min                      |
+
+**The served hybrid is flat** (0.302 / 0.297 / 0.302 — within noise, barely above
+CF-alone at 0.292): the blend is CF-dominated, so a sharper *content* channel gets
+washed out. Worse, bigger isn't even monotonic — `bge-large` *regresses* below
+`bge-base` on the content arm, so it's strictly dominated (slower **and** less
+accurate). Cost scales the wrong way: 4×–13× the offline embed time and 2×–2.7×
+the vector storage. `bge-base` does give a real **+13% on the content-only arm**,
+which only matters for **cold-start** (where content is the sole signal) — so if
+cold-start quality ever becomes the priority, `bge-base` (not `large`) is the one
+to re-test on `eval.cold_start`. For the warm hybrid we serve, `bge-small` stays.
+
 ### Eval harness layout
 
 | File | Role |
