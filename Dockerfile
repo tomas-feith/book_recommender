@@ -9,7 +9,7 @@
 #     docker build -t book-recommender .
 #     docker run --rm -p 8501:8501 book-recommender
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /srv
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
