@@ -85,6 +85,10 @@ class Catalog:
             pos = {str(b): i for i, b in enumerate(ids)}
             return np.array([pos[b["id"]] for b in books])
 
+        # Embeddings are stored fp16 (half the file + load), but kept fp32 in RAM:
+        # numpy has no fp16 GEMV on CPU, so an fp16-resident matrix would upcast on
+        # every query (~9x slower). fp16 ranking is accuracy-neutral -- the query-
+        # bandwidth win lands with an fp16-native index (FAISS/pgvector) at scale.
         emb_npz = np.load(data_dir / "real_embeddings.npz", allow_pickle=True)
         emb = emb_npz["emb"][perm_for(emb_npz["ids"].tolist())].astype(np.float32)
 

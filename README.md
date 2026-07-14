@@ -110,8 +110,16 @@ construction it rides CF, so zero-rating cold books can't be surprises.)
 ## Data pipeline & keeping the catalog fresh
 
 Every book is three aligned artifacts, all keyed by book id:
-`data/real_books.json` (metadata), `data/real_embeddings.npz` (content vector),
-`data/real_cf.npz` (item-item CF + popularity).
+`data/real_books.json` (metadata), `data/real_embeddings.npz` (content vector,
+**stored fp16** — half the file/load), `data/real_cf.npz` (item-item CF + popularity).
+
+> **On fp16 embeddings.** Vectors are stored fp16 (halves the file and load
+> bandwidth) but upcast to **fp32 in RAM** for serving: numpy has no fp16 GEMV on
+> CPU, so an fp16-resident matrix would upcast on *every* query (~9× slower here,
+> measured). fp16 ranking is accuracy-neutral (identical Recall@10). The *query*-
+> bandwidth win from fp16 needs an fp16-native index (FAISS / pgvector) — which is
+> the same scale-out step as [approximate NN](#migrating-to-postgres--pgvector);
+> fp16 storage is the prerequisite.
 
 | Script | Purpose |
 |--------|---------|

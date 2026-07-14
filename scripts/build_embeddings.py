@@ -39,10 +39,10 @@ def main() -> None:
     np.savez_compressed(
         out,
         ids=np.array([b["id"] for b in books]),
-        emb=emb.astype(np.float32),
+        emb=emb.astype(np.float16),  # half the file + resident footprint; fp16 ranking is fine
         model=np.array(label),
     )
-    print(f"Wrote {emb.shape} embeddings -> {out}")
+    print(f"Wrote {emb.shape} {emb.dtype} embeddings -> {out}")
 
 
 if __name__ == "__main__":
