@@ -267,28 +267,41 @@ fine-tuned encoder's vectors — same 384-dim, same numpy-only serving path.
 
 ## Development
 
-Lint, type-check, and tests run in CI on every push/PR (`.github/workflows/ci.yml`)
-and as pre-commit hooks. Everything goes through the uv-locked environment, so the
-same tool versions run locally and in CI.
+Lint, type-check, and tests run in CI on every push/PR and as pre-commit hooks.
+Everything goes through the uv-locked environment, so the same tool versions run
+locally and in CI. Common tasks are wrapped in a [`justfile`](justfile):
 
 ```bash
-uv sync                                          # install deps + dev tools
-uv run --no-sync pre-commit install              # ruff + mypy on commit
-uv run --no-sync pre-commit install --hook-type pre-push   # pytest on push
-
-uv run --no-sync ruff check .                    # lint
-uv run --no-sync ruff format .                   # format
-uv run --no-sync mypy                            # type-check (app/ + eval/)
-uv run --no-sync python -m pytest                # unit tests (tests/)
+just setup      # venv + deps + dev tools + git hooks (ruff/mypy on commit, pytest on push)
+just check      # everything CI runs: lint + format-check + mypy + tests
+just cov        # tests with coverage (enforces a 65% floor on the library)
+just audit      # pip-audit: known-vuln scan of dependencies
+just serve      # run the Streamlit app
+just finetune   # fine-tune the co-read encoder + re-embed
 ```
 
-The suite (`tests/`) covers the pure logic — ranking metrics, taste profiles, the
-hashing embedder, title search, catalog filters, the CF-matrix round-trip, both
-CF builders (KNN + **EASE-R**), and the recommender's scoring/selection contracts
-— all on tiny synthetic fixtures, so it runs in ~1s with no data files or torch.
-`ruff format` is enforced (`--check`) in CI; `mypy` is scoped to the `app/` and
-`eval/` library (the `scripts/` are operational glue over untyped, network-heavy
-deps).
+(Or run the underlying `uv run --no-sync <tool>` commands directly — see the
+justfile.) The suite (`tests/`) covers the pure logic — ranking metrics, taste
+profiles, the hashing embedder, title search, catalog filters, the CF-matrix
+round-trip, both CF builders (KNN + **EASE-R**), the recommender's
+scoring/selection contracts, and library-import parsing/matching — all on tiny
+synthetic fixtures, so it runs in ~1s with no data files or torch.
+
+**CI / infra** (`.github/`): the `ci.yml` workflow runs ruff (lint + `--check`
+format), mypy (scoped to `app/` + `eval/`), and pytest with a coverage floor, plus
+an advisory `pip-audit` job; `codeql.yml` runs GitHub's security-and-quality
+analysis; Dependabot keeps Python deps, Actions, and the Docker base image current.
+
+### Container
+
+Serving needs only numpy + scipy + streamlit (torch is offline-only), so the
+[`Dockerfile`](Dockerfile) is a single slim image with no ML runtime:
+
+```bash
+just build-data                 # produce the (gitignored) data artifacts first
+docker build -t book-recommender .
+docker run --rm -p 8501:8501 book-recommender
+```
 
 ## Migrating to Postgres + pgvector
 

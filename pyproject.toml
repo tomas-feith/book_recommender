@@ -22,8 +22,10 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "mypy>=2.3.0",
+    "pip-audit>=2.10.1",
     "pre-commit>=4.6.0",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15.21",
 ]
 
@@ -65,3 +67,17 @@ no_implicit_optional = true
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["app", "eval"]
+# The batch CLIs / demo are entrypoint scripts, not unit-tested library code.
+omit = [
+    "app/demo.py",
+    "eval/run.py",
+    "eval/compare_paradigms.py",
+    "eval/cold_start.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 65

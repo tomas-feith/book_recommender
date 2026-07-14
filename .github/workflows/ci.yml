@@ -5,6 +5,10 @@ on:
     branches: [master]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -28,5 +32,18 @@ jobs:
       - name: Mypy
         run: uv run --no-sync mypy
 
-      - name: Pytest
-        run: uv run --no-sync python -m pytest
+      - name: Pytest (with coverage floor)
+        run: uv run --no-sync python -m pytest --cov=app --cov=eval --cov-report=term-missing
+
+  audit:
+    # Advisory: reports vulnerable dependencies without blocking the merge.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: pip-audit
+        run: uv run --no-sync pip-audit
