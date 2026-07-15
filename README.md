@@ -8,12 +8,15 @@ adaptive-hybrid recommender re-ranks after every swipe. The product sits on top 
 harness** that picked the embedding model and the recommender architecture on
 real numbers instead of vibes; that evidence is documented at the bottom.
 
-The serving catalog is **~10,150 real books**: all of goodbooks-10k (real reader
-shelf-tags as genres, Open Library descriptions) plus **recent 2022-2025 releases**
-pulled from Open Library (goodbooks is frozen at 2017), ingested CF-cold via
-`scripts/add_books.py` (seed list in `data/recent_books.json`; re-add after a
-rebuild with `refresh.py --add data/recent_books.json`). New books are ranked by
-the co-read content encoder until they accrue reactions.
+The serving catalog is **~22,630 real books**: all of goodbooks-10k (real reader
+shelf-tags as genres, Open Library descriptions) plus **~12,600 modern books
+(2015-2025)** pulled from Open Library, since goodbooks is frozen at 2017. The
+modern half is deliberately spread — an equal quota per publication year, ~40
+subjects across fiction and nonfiction, a head/mid/tail popularity mix by
+*within-year* percentile, and a per-author cap (see `fetch_new_books.py
+--diverse`). It's ingested CF-cold via `scripts/add_books.py`, so new books are
+ranked by the co-read content encoder until they accrue reactions. Seed lists
+live in `data/` and are replayed with `refresh.py --add` after a rebuild.
 
 ## Quick start
 
@@ -171,7 +174,7 @@ builds its own artifacts. What's committed, and why:
 | Committed | Why it can't be regenerated |
 |-----------|------------------------------|
 | `data/sample_books.json`, `data/sample_profiles.json` | Hand-curated demo fixtures (48 books / 8 profiles). No generator exists — they're source, and `python -m eval.run` reads them by default. |
-| `data/recent_books.json`, `data/expansion_10k.json` | **Open Library snapshots.** OL is a live catalog, so re-running the fetcher returns *different* books — never these. Keeping the seed lists is the only way to rebuild the same serving catalog. |
+| `data/recent_books.json`, `data/expansion_10k.json`, `data/topup_head.json` | **Open Library snapshots.** OL is a live catalog, so re-running the fetcher returns *different* books — never these. Keeping the seed lists is the only way to rebuild the same serving catalog. |
 
 Everything else is a build output: `real_books.json`, `real_profiles.json`,
 `real_embeddings.npz`, `real_cf.npz`, `coread-encoder/`, and the runtime
@@ -196,6 +199,11 @@ uv run --no-sync python scripts/build_embeddings.py
 #    --no-cf because these books arrive CF-cold by design; they carry no ratings.
 uv run --no-sync python scripts/refresh.py --add data/recent_books.json --no-cf
 uv run --no-sync python scripts/refresh.py --add data/expansion_10k.json --no-cf
+uv run --no-sync python scripts/refresh.py --add data/topup_head.json --no-cf
+
+# 5. normalize the Open Library books' genre tags onto the goodbooks vocabulary
+#    (re-embeds the rows it changes)
+uv run --no-sync python scripts/refresh_subjects.py
 ```
 
 To pull a *fresh* modern batch instead of replaying the seeds — a different set
