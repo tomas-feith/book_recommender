@@ -15,15 +15,29 @@ venv/
 # Secrets
 .env
 
-# User state — per-user swipe log, regenerated at runtime
-data/app.db
+# --- data/ -------------------------------------------------------------------
+# Everything here is a build artifact EXCEPT the seed lists un-ignored below.
+# Rebuild the rest with the pipeline in the README ("Building the data"):
+#   real_books.json / real_profiles.json  <- build_real_dataset.py
+#   coread-encoder/                       <- finetune_coread.py   (~130MB)
+#   real_embeddings.npz                   <- build_embeddings.py
+#   real_cf.npz                           <- refresh.py / cf_build.py
+#   app.db                                <- created at runtime (per-user swipes)
+data/*
+!data/.gitkeep
 
-# Sparse CF matrix — large & regenerable (build_real_dataset.py / refresh.py)
-data/real_cf.npz
+# Hand-curated demo fixtures. No generator exists for these -- they are source,
+# and `python -m eval.run` (the zero-dep baseline) reads them by default.
+!data/sample_books.json
+!data/sample_profiles.json
 
-# Co-read fine-tuned encoder — large (~130MB) & regenerable (finetune_coread.py)
-data/coread-encoder/
-data/coread-encoder.ckpt*.pt
+# Open Library snapshots. These CANNOT be regenerated: OL is a live catalog, so
+# re-running the fetcher returns different books, not these. They are the seed
+# lists that let `refresh.py --add` rebuild the same serving catalog, so they are
+# source too -- despite the size.
+!data/recent_books.json
+!data/expansion_10k.json
+!data/topup_head.json
 
 # Coverage data
 .coverage

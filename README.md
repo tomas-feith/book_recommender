@@ -21,15 +21,20 @@ The project uses a **uv-managed** environment on Python 3.12 (torch and Streamli
 both have wheels there):
 
 ```bash
-uv sync                                          # create the venv, install deps
-uv run --no-sync python scripts/build_real_dataset.py   # generate data/real_cf.npz (gitignored, ~3MB)
-uv run streamlit run streamlit_app.py            # the app at http://localhost:8501
+uv sync                                                 # create the venv, install deps
+uv run --no-sync python scripts/build_real_dataset.py   # goodbooks-10k -> books, profiles, CF
+uv run --no-sync python scripts/build_embeddings.py     # content vectors (needs torch)
+uv run streamlit run streamlit_app.py                   # the app at http://localhost:8501
 ```
 
-The sparse CF matrix (`data/real_cf.npz`) is **gitignored** — it's regenerable,
-so build it once with the step above (or `refresh.py`). Serving needs only
-**numpy + scipy** (scipy loads the sparse matrix); torch is an *offline-only*
-dependency, used to build embeddings, not to serve.
+The serving artifacts in `data/` are **gitignored** — they're build outputs, so a
+fresh clone builds them once with the steps above. Only the things that *can't*
+be regenerated are committed (the demo fixtures and the Open Library seed lists);
+see [Building the data](#building-the-data) for the full pipeline, including the
+modern catalog and the co-read encoder.
+
+Serving needs only **numpy + scipy** (scipy loads the sparse matrix); torch is an
+*offline-only* dependency, used to build embeddings, not to serve.
 
 ## The app
 
@@ -138,7 +143,7 @@ Every book is three aligned artifacts, all keyed by book id:
 | `scripts/build_embeddings.py`   | Cache the content vectors (10000×384) so serving never loads torch. Uses the **co-read fine-tuned** encoder (`data/coread-encoder`) when present, else stock `bge-small`. |
 | `scripts/finetune_coread.py`    | **Cold-start fine-tune.** Distill EASE's co-read structure INTO the content encoder: build (anchor, positive) pairs from each book's top EASE neighbors and fine-tune `bge-small` with an in-batch contrastive (InfoNCE) objective. Gives unrated books a collaborative-aware embedding EASE can't (see evidence below). Writes `data/coread-encoder`; then re-run `build_embeddings.py`. |
 | `scripts/cf_build.py`           | CF matrix builders, both emitting the same sparse top-k format. Default is **EASE-R** (`ease_cf`: closed-form `B=-P/diag(P)`, `P=(XᵀX+λI)⁻¹`, λ=1000, top-50) — **+35% Recall@10** over the older adjusted-cosine KNN (`sparse_topk_cf`, kept as a fallback). Truncated to ~4MB vs a ~370MB dense matrix, with no ranking loss. |
-| `scripts/fetch_new_books.py`    | Pull genuinely-new books from the **Open Library** search API (by subject, English, recent-year range, ranked by reader count; requires author + cover). Maps to the catalog schema with `ol:`-prefixed ids and dedups against existing ids/titles. |
+| `scripts/fetch_new_books.py`    | Pull genuinely-new books from the **Open Library** search API. Maps to the catalog schema with `ol:`-prefixed ids and dedups against existing ids/titles. `--fetch-new N` (via `refresh.py`) tops up by tens. **`--diverse`** is the bulk path (thousands): it partitions the search into (subject × year) cells and selects against explicit quotas — an equal **year** quota (OL holds far more well-read 2015 books than 2025 ones, so pooling years returns a backlist), head/mid/tail **popularity** by *within-year* percentile (readinglog accumulates with age — absolute cutoffs file every recent book as tail), ~40 **subjects** across fiction and nonfiction, and a per-**author** cap. `--head-only` takes the most-read books per cell instead, to top up the marquee titles. |
 | `scripts/enrich_google_books.py`| Fill missing descriptions/categories/covers on existing books via the **Google Books API** (~48% of goodbooks entries lack a description), then re-embed only the changed rows. Needs a free `GOOGLE_BOOKS_API_KEY` (the anonymous quota is a shared, usually-exhausted pool). |
 | `scripts/fetch_google_books.py` | Add NEW books from the **Google Books API** by subject (`gb:` ids), deduped against the catalog; writes a JSON list for `add_books`/`refresh --add`. The source-side companion to the enricher. Same API key via `.env`. |
 | `scripts/add_books.py`          | **Incrementally** append new books to all three artifacts — embeds only the new ones (same model, guarded), grows CF with zero rows so new books start cold (pop=0, content-ranked). Idempotent, atomic. |
@@ -156,6 +161,45 @@ uv run --no-sync python scripts/refresh.py               # rebuild CF from swipe
 
 The design intent: **content carries new books until real usage accrues; the
 refresh job then turns that usage into collaborative signal.**
+
+### Building the data
+
+`data/` is gitignored apart from what cannot be regenerated, so a fresh clone
+builds its own artifacts. What's committed, and why:
+
+| Committed | Why it can't be regenerated |
+|-----------|------------------------------|
+| `data/sample_books.json`, `data/sample_profiles.json` | Hand-curated demo fixtures (48 books / 8 profiles). No generator exists — they're source, and `python -m eval.run` reads them by default. |
+| `data/recent_books.json`, `data/expansion_10k.json` | **Open Library snapshots.** OL is a live catalog, so re-running the fetcher returns *different* books — never these. Keeping the seed lists is the only way to rebuild the same serving catalog. |
+
+Everything else is a build output: `real_books.json`, `real_profiles.json`,
+`real_embeddings.npz`, `real_cf.npz`, `coread-encoder/`, and the runtime
+`app.db`. Full rebuild, in order:
+
+```bash
+uv sync
+
+# 1. goodbooks-10k -> data/real_books.json + real_profiles.json + real_cf.npz.
+#    Downloads are cached, so re-runs are fast.
+uv run --no-sync python scripts/build_real_dataset.py
+
+# 2. OPTIONAL but shipped: fine-tune the content encoder on EASE co-read pairs
+#    -> data/coread-encoder (~130MB). Needs step 1's CF matrix. Skip it and
+#    step 3 falls back to stock bge-small (measurably worse at cold-start).
+uv run --no-sync python scripts/finetune_coread.py
+
+# 3. content vectors -> data/real_embeddings.npz (uses the encoder from step 2)
+uv run --no-sync python scripts/build_embeddings.py
+
+# 4. the modern catalog: replay the Open Library seeds (goodbooks stops at 2017).
+#    --no-cf because these books arrive CF-cold by design; they carry no ratings.
+uv run --no-sync python scripts/refresh.py --add data/recent_books.json --no-cf
+uv run --no-sync python scripts/refresh.py --add data/expansion_10k.json --no-cf
+```
+
+To pull a *fresh* modern batch instead of replaying the seeds — a different set
+of books, by design — see `fetch_new_books.py --diverse` above, then ingest the
+JSON it writes with `refresh.py --add`.
 
 ## Why these choices — the evidence
 
