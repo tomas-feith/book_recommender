@@ -33,6 +33,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))  # sibling-script imports
+
+from add_books import _resolve_model  # noqa: E402
 
 from eval.data import book_to_text  # noqa: E402
 
@@ -171,16 +174,20 @@ def _reembed(data_dir: Path, changed: dict) -> None:
 
     ids_to_embed = [k for k in changed if k in pos]
     print(f"Re-embedding {len(ids_to_embed)} changed books with {model}...")
-    vecs = SentenceTransformerEmbedder(model).encode(
+    # The stored value is a *label* ('coread-finetuned bge-small'), not something
+    # SentenceTransformer can load -- passing it straight through makes HF read it
+    # as a repo id and raise on the space. Resolve it to the encoder directory so
+    # the rewritten rows land in the same space as the untouched ones.
+    vecs = SentenceTransformerEmbedder(_resolve_model(model, data_dir)).encode(
         [book_to_text(changed[k]) for k in ids_to_embed]
     )
     for k, v in zip(ids_to_embed, vecs, strict=True):
         emb[pos[k]] = v
 
     tmp = emb_path.with_name(emb_path.stem + ".tmp.npz")
+    # Keep writing the label, not the resolved path -- add_books guards against
+    # mixing spaces by comparing this string.
     np.savez_compressed(tmp, ids=ids, emb=emb, model=np.array(model))
-    import os
-
     os.replace(tmp, emb_path)
     print(f"Updated {len(ids_to_embed)} embedding rows -> {emb_path}")
 
