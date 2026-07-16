@@ -343,8 +343,10 @@ over the top `REC_POOL_MULT·n` candidates, capped per author. The three terms:
 NP-hard so greedy is the standard approximation), and **genre calibration** (Steck):
 `cal_lambda` pulls the list's genre mix toward the user's taste mix via KL
 divergence, so a minority taste isn't drowned out by the majority one. A
-single-author saga is collapsed by the author cap; cross-author near-duplicates by
-the similarity penalty; taste *coverage* by calibration.
+single-author saga is collapsed by the author cap (which keys on *every* credited
+name, so a pseudonym or co-credit — "Richard Bachman, Stephen King" — can't slip a
+second book past it); cross-author near-duplicates by the similarity penalty; taste
+*coverage* by calibration.
 
 `eval.diversity` sweeps both knobs over the real profiles, measuring Recall@10
 against **intra-list distance** (ILD), **genre entropy**, **miscalibration KL**
