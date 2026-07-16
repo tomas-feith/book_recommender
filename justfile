@@ -60,7 +60,7 @@ finetune:
 eval:
     uv run --no-sync python -m eval.compare_paradigms
 
-# build + run the minimal serving container
+# build + run the minimal serving container (maps to the next free host port)
 docker:
     docker build -t book-recommender .
-    docker run --rm -p 8501:8501 book-recommender
+    PORT=$(uv run --no-sync python scripts/freeport.py) && echo ">> container on http://localhost:$PORT" && docker run --rm -p "$PORT:8501" book-recommender

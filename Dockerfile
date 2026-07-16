@@ -5,9 +5,9 @@
 # Prerequisite: build the (gitignored, regenerable) data artifacts first, so they
 # are in the build context:
 #     just build-data          # -> data/real_books.json, real_embeddings.npz, real_cf.npz
-# Then:
+# Then `just docker` (picks a free host port), or manually:
 #     docker build -t book-recommender .
-#     docker run --rm -p 8501:8501 book-recommender
+#     docker run --rm -p 8501:8501 book-recommender   # -p HOST:8501; change HOST if 8501 is taken
 
 FROM python:3.14-slim
 
