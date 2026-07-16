@@ -41,9 +41,9 @@ check: lint typecheck test
 audit:
     uv run --no-sync pip-audit
 
-# run the Streamlit app
+# run the Streamlit app (falls forward from 8501 if that port is taken)
 serve:
-    uv run streamlit run streamlit_app.py
+    PORT=$(uv run --no-sync python scripts/freeport.py) && uv run streamlit run streamlit_app.py --server.port "$PORT"
 
 # --- offline data pipeline (needs the torch env) ---
 

@@ -27,8 +27,11 @@ both have wheels there):
 uv sync                                                 # create the venv, install deps
 uv run --no-sync python scripts/build_real_dataset.py   # goodbooks-10k -> books, profiles, CF
 uv run --no-sync python scripts/build_embeddings.py     # content vectors (needs torch)
-uv run streamlit run streamlit_app.py                   # the app at http://localhost:8501
+just serve                                              # the app at http://localhost:8501
 ```
+
+`just serve` falls forward to the next free port if 8501 is already taken, and
+prints the URL it settled on.
 
 The serving artifacts in `data/` are **gitignored** — they're build outputs, so a
 fresh clone builds them once with the steps above. Only the things that *can't*
