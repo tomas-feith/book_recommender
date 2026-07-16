@@ -24,6 +24,13 @@ st.set_page_config(page_title="Book match", page_icon=":material/menu_book:")
 CARDS_PER_FETCH = 12
 MIN_SEEDS = 3
 
+# The catalog runs back to -1750 (the Epic of Gilgamesh), but ~98% of it is
+# post-1859 -- a linear slider over the true min/max gives the antiquity tail 97%
+# of the travel and squeezes the half of the catalog published since 2016 into a
+# few pixels. So the slider bottoms out at this percentile and treats that floor
+# as open-ended ("and earlier"), which keeps the old books reachable.
+YEAR_FLOOR_PCT = 1
+
 
 # --- engine (shared across sessions) ------------------------------------------
 
@@ -38,12 +45,13 @@ def get_service() -> BookRecommenderService:
 def filter_options():
     svc = get_service()
     langs = sorted({(b.get("language") or "en") for b in svc.catalog.books})
-    years = [b["year"] for b in svc.catalog.books if b.get("year")]
+    years = sorted(b["year"] for b in svc.catalog.books if b.get("year"))
+    floor = years[len(years) * YEAR_FLOOR_PCT // 100] // 10 * 10  # round down to the decade
     return {
         "languages": langs,
         "genres": svc.genres()[:40],
-        "year_min": min(years),
-        "year_max": max(years),
+        "year_floor": min(floor, years[-1]),  # a tiny catalog could put the floor at the top
+        "year_max": years[-1],
     }
 
 
@@ -154,11 +162,14 @@ def restart() -> None:
 
 
 def current_filters() -> dict:
+    lo, hi = st.session_state.get("f_years") or (opts["year_floor"], opts["year_max"])
     return {
         "languages": st.session_state.get("f_langs") or None,
         "genres": st.session_state.get("f_genres") or None,
-        "year_min": (st.session_state.get("f_years") or (opts["year_min"], opts["year_max"]))[0],
-        "year_max": (st.session_state.get("f_years") or (opts["year_min"], opts["year_max"]))[1],
+        # At the floor the bound is open-ended: drop it so the pre-floor books
+        # (Homer, Gilgamesh) still come through rather than being filtered out.
+        "year_min": None if lo <= opts["year_floor"] else lo,
+        "year_max": hi,
     }
 
 
@@ -244,11 +255,14 @@ with st.sidebar:
     st.multiselect("Genres", opts["genres"], key="f_genres", placeholder="Any genre")
     st.slider(
         "Publication year",
-        opts["year_min"],
+        opts["year_floor"],
         opts["year_max"],
-        value=(opts["year_min"], opts["year_max"]),
+        value=(opts["year_floor"], opts["year_max"]),
         key="f_years",
     )
+    _lo, _hi = st.session_state.get("f_years") or (opts["year_floor"], opts["year_max"])
+    if _lo <= opts["year_floor"]:
+        st.caption(f"{opts['year_floor']} and earlier → {_hi} (includes all of antiquity)")
 
     counts = svc.profile_summary(st.session_state.user_id)
     st.subheader("Your taste so far", anchor=False)
