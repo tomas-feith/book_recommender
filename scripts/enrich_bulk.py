@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -37,7 +38,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))  # sibling-script imports
 
 from enrich_google_books import _reembed  # noqa: E402  (reuse the row-wise re-embed)
-from ingest_goodreads_ucsd import stream_jsonl_gz  # noqa: E402
+from ingest_goodreads_ucsd import _to_int, stream_jsonl_gz  # noqa: E402
 from ingest_openlibrary_dump import _text, stream_dump  # noqa: E402
 
 DATA = ROOT / "data"
@@ -127,11 +128,124 @@ def fill_from_ol_works(targets: dict[str, dict], works_gz: Path) -> dict[str, di
     return changed
 
 
+# --- title-match fallback (for books with no key join, e.g. OL works) ---------------
+#
+# The ol: books have no goodreads_book_id and no ISBN, so they can't key-join to the
+# goodreads dump -- but many are common titles that ARE in it. Matching on title is
+# fuzzy, and a *wrong* description is worse than a blank one (it poisons the book's
+# embedding), so this is deliberately precision-over-recall: it corroborates a title
+# with the publication year, rejects anything ambiguous, and never guesses.
+
+_PARENS = re.compile(r"[(\[].*?[)\]]")  # "(Discworld, #5)", "[UK edition]"
+_NONWORD = re.compile(r"[^a-z0-9]+")
+YEAR_TOL = 1  # editions drift a year; beyond that it's likely a different book
+# A distinctive multi-word title ("Nemesis Games") is safe on its own, but a short
+# generic one ("Alice", "Self Defense") can land on the wrong book even with a year
+# match -- so require such a title to resolve to a well-rated (i.e. canonical) edition,
+# since a wrong obscure match has few ratings. Tunable precision/recall knob.
+SHORT_TITLE_WORDS = 2
+MIN_RATINGS_SHORT = 50
+
+
+def _norm_title(title: str) -> str:
+    """Aggressively normalize a title for matching: drop series/edition parens and
+    punctuation, lowercase, collapse whitespace. Favors precision -- a subtitle
+    mismatch just misses rather than mis-matches."""
+    t = _PARENS.sub(" ", title.lower())
+    return " ".join(_NONWORD.sub(" ", t).split())
+
+
+def title_targets(missing: list[dict]) -> dict[str, list[dict]]:
+    """normalized-title -> the still-missing books wanting it (a list: titles collide)."""
+    out: dict[str, list[dict]] = {}
+    for b in missing:
+        key = _norm_title(b.get("title", ""))
+        if key:
+            out.setdefault(key, []).append(b)
+    return out
+
+
+def _pick_record(book: dict, recs: list[dict]) -> dict | None:
+    """Choose the safest goodreads record for ``book``, or None if unsafe/ambiguous.
+
+    With a year: require a candidate within YEAR_TOL (else reject -- a same-title,
+    different-year book is probably a different work). Without a year: only accept if
+    the candidates are a single work (otherwise we can't tell them apart). Ties break
+    to the most-rated edition (the canonical one).
+    """
+    yr = book.get("year")
+    if yr:
+        pool = [
+            r
+            for r in recs
+            if (py := _to_int(r.get("publication_year"))) and abs(py - yr) <= YEAR_TOL
+        ]
+    else:
+        pool = recs if len({r.get("work_id") for r in recs}) == 1 else []
+    if not pool:
+        return None
+    best = max(pool, key=lambda r: _to_int(r.get("ratings_count")))
+    n_words = len(_norm_title(book.get("title", "")).split())
+    if n_words <= SHORT_TITLE_WORDS and _to_int(best.get("ratings_count")) < MIN_RATINGS_SHORT:
+        return None  # generic short title without a popular canonical match -> too risky
+    return best
+
+
+def fill_from_goodreads_titles(
+    targets: dict[str, list[dict]], books_gz: Path, dry_run: bool = False
+) -> dict[str, dict]:
+    """Stream the goodreads dump once, collect description-bearing records per needed
+    title, then resolve each book to one record (or skip if ambiguous)."""
+    cand: dict[str, list[dict]] = {}
+    for raw in stream_jsonl_gz(books_gz):
+        if not (raw.get("description") or "").strip():
+            continue
+        key = _norm_title(raw.get("title_without_series") or raw.get("title") or "")
+        if key in targets:
+            cand.setdefault(key, []).append(raw)
+
+    # Resolve every book to a record FIRST (no mutation), so collisions can be dropped
+    # before anything is written -- otherwise a discarded match would still have left a
+    # wrong description on the book.
+    resolved: dict[str, tuple[dict, dict]] = {}  # book id -> (book, chosen record)
+    assigned: dict[str, list[str]] = {}  # work_id -> book ids sharing it
+    for key, books in targets.items():
+        recs = cand.get(key)
+        if not recs:
+            continue
+        for b in books:
+            rec = _pick_record(b, recs)
+            if rec is None:
+                continue
+            resolved[b["id"]] = (b, rec)
+            assigned.setdefault(str(rec.get("work_id")), []).append(b["id"])
+
+    # Two of our books resolving to the SAME goodreads work means we couldn't tell them
+    # apart -- drop both rather than assign a maybe-wrong description.
+    for ids in assigned.values():
+        if len(ids) > 1:
+            for bid in ids:
+                resolved.pop(bid, None)
+
+    changed: dict[str, dict] = {}
+    for bid, (b, rec) in resolved.items():
+        shelves = [
+            s.get("name", "")
+            for s in sorted(rec.get("popular_shelves", []), key=lambda s: -_to_int(s.get("count")))
+        ]
+        if not dry_run:
+            _apply(b, (rec["description"] or "").strip(), shelves, rec.get("image_url", ""))
+        changed[bid] = b
+    return changed
+
+
 def enrich(
     data_dir: Path = DATA,
     goodreads: Path | None = None,
     ol_works: Path | None = None,
+    title_match: bool = False,
     re_embed: bool = True,
+    dry_run: bool = False,
 ) -> dict[str, dict]:
     books = json.loads((data_dir / "real_books.json").read_text(encoding="utf-8"))
     missing = _missing(books)
@@ -143,18 +257,29 @@ def enrich(
     )
 
     changed: dict[str, dict] = {}
-    if goodreads:
+    if goodreads and gr_t:
         got = fill_from_goodreads(gr_t, goodreads)
-        print(f"  goodreads dump: filled {len(got)}")
+        print(f"  goodreads (key):   filled {len(got)}")
         changed.update(got)
-    if ol_works:
+    if ol_works and ol_t:
         got = fill_from_ol_works(ol_t, ol_works)
-        print(f"  OL works dump:  filled {len(got)}")
+        print(f"  OL works (key):    filled {len(got)}")
+        changed.update(got)
+    if title_match and goodreads:
+        # Books with no key join (the OL works) matched by title+year against the same
+        # goodreads dump. Runs on what's STILL missing after the key fills above.
+        tt = title_targets(_missing(books))
+        got = fill_from_goodreads_titles(tt, goodreads, dry_run=dry_run)
+        print(f"  goodreads (title): {'would fill' if dry_run else 'filled'} {len(got)}")
         changed.update(got)
 
     if not changed:
         print("Nothing filled (no dumps given, or no matches with a description).")
         return {}
+
+    if dry_run:
+        print(f"[dry-run] {len(changed)} descriptions would be filled; nothing written.")
+        return changed
 
     (data_dir / "real_books.json").write_text(
         json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -169,11 +294,29 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Backfill descriptions from bulk dataset dumps.")
     ap.add_argument("--goodreads", type=Path, help="UCSD goodreads_books.json.gz")
     ap.add_argument("--ol-works", type=Path, help="OL ol_dump_works_latest.txt.gz")
+    ap.add_argument(
+        "--title-match",
+        action="store_true",
+        help="Also match no-key books (OL works) by title+year against --goodreads.",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what the title-match would fill without writing or re-embedding.",
+    )
     ap.add_argument("--no-embed", action="store_true", help="Skip re-embedding.")
     args = ap.parse_args()
     if not args.goodreads and not args.ol_works:
         ap.error("give at least one of --goodreads / --ol-works")
-    enrich(goodreads=args.goodreads, ol_works=args.ol_works, re_embed=not args.no_embed)
+    if args.title_match and not args.goodreads:
+        ap.error("--title-match needs --goodreads (it matches against that dump)")
+    enrich(
+        goodreads=args.goodreads,
+        ol_works=args.ol_works,
+        title_match=args.title_match,
+        re_embed=not args.no_embed,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

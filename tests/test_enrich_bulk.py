@@ -112,6 +112,185 @@ def test_fill_from_ol_works_matches_work_key(tmp_path):
     assert "42-M.jpg" in book["image"]
 
 
+# ---- title-match fallback (fuzzy join; precision guards are the point) --------
+
+
+def test_norm_title_strips_series_and_punctuation():
+    assert enrich_bulk._norm_title("The Color of Magic (Discworld, #1)") == "the color of magic"
+    assert enrich_bulk._norm_title("Guards! Guards!") == "guards guards"
+
+
+def _gr(book_id, title, desc, year, rc, work_id):
+    return json.dumps(
+        {
+            "book_id": book_id,
+            "title": title,
+            "title_without_series": title,
+            "description": desc,
+            "publication_year": str(year),
+            "ratings_count": str(rc),
+            "work_id": work_id,
+            "popular_shelves": [],
+        }
+    )
+
+
+def test_title_match_fills_by_title_and_year(tmp_path):
+    book = {
+        "id": "ol:OL9W",
+        "title": "Ancillary Justice",
+        "year": 2013,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Ancillary Justice", "Radch space opera.", 2013, 5000, "w1")])
+    targets = enrich_bulk.title_targets([book])
+    changed = enrich_bulk.fill_from_goodreads_titles(targets, dump)
+    assert set(changed) == {"ol:OL9W"}
+    assert book["description"] == "Radch space opera."
+
+
+def test_title_match_rejects_year_mismatch(tmp_path):
+    # Same title, but the only candidate is 30 years off -> almost certainly a
+    # different book, so reject rather than mis-fill.
+    book = {
+        "id": "ol:OL9W",
+        "title": "Foundation",
+        "year": 2021,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Foundation", "Asimov's classic.", 1951, 9000, "w1")])
+    targets = enrich_bulk.title_targets([book])
+    assert enrich_bulk.fill_from_goodreads_titles(targets, dump) == {}
+    assert book["description"] == ""
+
+
+def test_title_match_no_year_requires_single_work(tmp_path):
+    # Our book has no year; two different works share the title -> ambiguous -> skip.
+    book = {
+        "id": "ol:OL9W",
+        "title": "Passage",
+        "year": None,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(
+        dump,
+        [
+            _gr("1", "Passage", "Connie Willis novel.", 2001, 8000, "wA"),
+            _gr("2", "Passage", "A different Passage.", 2014, 100, "wB"),
+        ],
+    )
+    targets = enrich_bulk.title_targets([book])
+    assert enrich_bulk.fill_from_goodreads_titles(targets, dump) == {}
+
+
+def test_title_match_rejects_generic_short_title_with_few_ratings(tmp_path):
+    # "Alice" + right year but an obscure 11-rating match -> too risky, skip.
+    book = {
+        "id": "ol:OL9W",
+        "title": "Alice",
+        "year": 2018,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Alice", "Some other Alice.", 2018, 11, "w1")])
+    targets = enrich_bulk.title_targets([book])
+    assert enrich_bulk.fill_from_goodreads_titles(targets, dump) == {}
+    assert book["description"] == ""
+
+
+def test_title_match_accepts_short_title_when_well_rated(tmp_path):
+    # Same short title, but a clearly-canonical 900k-rating edition -> safe to fill.
+    book = {
+        "id": "ol:OL9W",
+        "title": "Damnation",
+        "year": 2015,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Damnation", "The real one.", 2015, 997, "w1")])
+    targets = enrich_bulk.title_targets([book])
+    changed = enrich_bulk.fill_from_goodreads_titles(targets, dump)
+    assert set(changed) == {"ol:OL9W"}
+
+
+def test_title_match_picks_most_rated_edition(tmp_path):
+    book = {
+        "id": "ol:OL9W",
+        "title": "Dune",
+        "year": 1965,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(
+        dump,
+        [
+            _gr("1", "Dune", "Reissue blurb.", 1965, 50, "w1"),
+            _gr("2", "Dune", "Canonical blurb.", 1965, 900000, "w1"),
+        ],
+    )
+    targets = enrich_bulk.title_targets([book])
+    enrich_bulk.fill_from_goodreads_titles(targets, dump)
+    assert book["description"] == "Canonical blurb."
+
+
+def test_title_match_drops_two_books_colliding_on_one_work(tmp_path):
+    # Two of OUR books normalize to the same title and both resolve to the same
+    # goodreads work -> we can't tell them apart -> neither is filled.
+    b1 = {
+        "id": "ol:A",
+        "title": "Twins",
+        "year": 2010,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    b2 = {
+        "id": "ol:B",
+        "title": "Twins",
+        "year": 2010,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Twins", "Only one blurb.", 2010, 500, "w1")])
+    targets = enrich_bulk.title_targets([b1, b2])
+    assert enrich_bulk.fill_from_goodreads_titles(targets, dump) == {}
+    assert b1["description"] == "" and b2["description"] == ""
+
+
+def test_title_match_dry_run_reports_without_mutating(tmp_path):
+    book = {
+        "id": "ol:OL9W",
+        "title": "Spin",
+        "year": 2005,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Spin", "Time dilation.", 2005, 4000, "w1")])
+    targets = enrich_bulk.title_targets([book])
+    changed = enrich_bulk.fill_from_goodreads_titles(targets, dump, dry_run=True)
+    assert set(changed) == {"ol:OL9W"}  # reported as would-fill
+    assert book["description"] == ""  # but NOT mutated
+
+
 # ---- end to end (both dumps, then the shared re-embed is skipped) -------------
 
 
