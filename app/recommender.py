@@ -36,6 +36,9 @@ ALPHA = 0.6  # "interested" weight (Rocchio + CF), < 1: intent is softer than a 
 MMR_LAMBDA = 0.5  # diversity vs relevance in MMR selection (1.0 = pure relevance)
 EXPLORE_FRAC = 0.25  # share of swipe cards drawn from beyond the top band
 REC_POOL_MULT = 20  # "For You": diversify within the top REC_POOL_MULT*n candidates
+# Honorifics are comma-split into their own credit ('Martin Luther King, Jr.'), so
+# they'd cap every unrelated 'Jr.' together. Mononyms (Plato, CLAMP) are real keys.
+_SUFFIXES = frozenset({"jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "ph.d.", "phd", "m.d.", "md"})
 CAL_LAMBDA = 0.4  # "For You": genre-calibration strength (0 = off); see finetune notes
 CAL_SMOOTH = 0.01  # KL smoothing so an absent list-genre doesn't blow up
 
@@ -159,10 +162,24 @@ class Recommender:
                 mask[self.cat.id_to_idx[bid]] = False
         return mask
 
-    def _primary_author(self, book_idx: int) -> str:
-        """First credited author, normalized -- so 'Rowling, GrandPré' and plain
-        'Rowling' (translator/illustrator noise) dedupe together."""
-        return (self.cat.books[book_idx].get("author", "").split(",")[0]).strip().lower()
+    def _author_keys(self, book_idx: int) -> list[str]:
+        """EVERY credited name, normalized -- the keys a book is capped under.
+
+        Capping on the first credit only let an author past their own cap under a
+        co-credit: 'Richard Bachman, Stephen King' keyed as 'richard bachman' (the
+        pseudonym), and 'Stephen Briggs, Terry Pratchett' as 'stephen briggs', so a
+        Discworld fan got the cap twice over. Matching on *any* shared credit closes
+        that, and still dedupes 'Rowling, GrandPré' against plain 'Rowling'.
+        """
+        raw = self.cat.books[book_idx].get("author", "") or ""
+        return [p for part in raw.split(",") if (p := part.strip().lower()) and p not in _SUFFIXES]
+
+    def _cap_hit(self, keys: list[str], counts: dict[str, int], per_author: int) -> bool:
+        return any(counts.get(k, 0) >= per_author for k in keys)
+
+    def _count_author(self, keys: list[str], counts: dict[str, int]) -> None:
+        for k in keys:
+            counts[k] = counts.get(k, 0) + 1
 
     def _split(self, reactions: dict[str, str]):
         liked = [
@@ -294,10 +311,10 @@ class Recommender:
         author_count: dict[str, int] = {}
         for j in np.argsort(-novelty):  # most novel first
             i = int(keep[j])
-            author = self._primary_author(i)
-            if author and author_count.get(author, 0) >= per_author:
+            keys = self._author_keys(i)
+            if self._cap_hit(keys, author_count, per_author):
                 continue
-            author_count[author] = author_count.get(author, 0) + 1
+            self._count_author(keys, author_count)
             out.append(
                 Scored(
                     book=self.cat.books[i],
@@ -369,8 +386,7 @@ class Recommender:
             base = lam * rel_v - (1 - lam) * div_v
             best_idx, best_val = -1, -1e18
             for idx, p in enumerate(pool):
-                author = self._primary_author(p)
-                if author and author_count.get(author, 0) >= per_author:
+                if self._cap_hit(self._author_keys(p), author_count, per_author):
                     continue
                 val = float(base[idx])
                 if target:  # genre-calibration penalty for the list-with-p (cheap, per-item)
@@ -388,9 +404,7 @@ class Recommender:
                 best_idx = int(np.argmax(rel_v))
             best = pool[best_idx]
             selected.append(best)
-            author = self._primary_author(best)
-            if author:
-                author_count[author] = author_count.get(author, 0) + 1
+            self._count_author(self._author_keys(best), author_count)
             for g, m in self._book_genre_mass(best).items():  # fold into running mass
                 sel_mass[g] = sel_mass.get(g, 0.0) + m
                 sel_total += m
@@ -455,12 +469,11 @@ class Recommender:
         author_count: dict[str, int] = {}
         for j in np.argsort(-score):
             j = int(j)
-            author = self._primary_author(j)
-            if author and author_count.get(author, 0) >= per_author:
+            keys = self._author_keys(j)
+            if self._cap_hit(keys, author_count, per_author):
                 continue
             picks.append(j)
-            if author:
-                author_count[author] = author_count.get(author, 0) + 1
+            self._count_author(keys, author_count)
             if len(picks) == n:
                 break
         seed_title = self.cat.books[i]["title"]
