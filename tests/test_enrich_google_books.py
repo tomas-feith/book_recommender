@@ -6,7 +6,10 @@ around it -- which is where the bug was.
 
 from __future__ import annotations
 
+import io
+import json
 import sys
+import urllib.error
 from pathlib import Path
 from typing import ClassVar
 
@@ -85,3 +88,117 @@ def test_reembed_ignores_unknown_ids(catalog):
     enrich_google_books._reembed(catalog, {"nope": BOOK})
     with np.load(catalog / "real_embeddings.npz", allow_pickle=True) as z:
         assert np.allclose(z["emb"], np.eye(2, 4))
+
+
+# --- 503 handling / quota accounting -------------------------------------------------
+#
+# The search endpoint 503s intermittently even when Google is healthy (observed
+# ~70% of requests during an outage). These pin that one flaky book neither kills
+# the run nor silently poisons the cache, and that --limit bounds *requests*.
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(b""))
+
+
+@pytest.fixture
+def books_dir(tmp_path, monkeypatch):
+    """A catalog of 30 description-less books, with a scratch cache file."""
+    books = [
+        {"id": str(i), "title": f"t{i}", "author": "a", "description": "", "subjects": []}
+        for i in range(30)
+    ]
+    (tmp_path / "real_books.json").write_text(json.dumps(books), encoding="utf-8")
+    monkeypatch.setattr(enrich_google_books, "CACHE", tmp_path / "cache.json")
+    monkeypatch.setattr(enrich_google_books.time, "sleep", lambda *_: None)
+    return tmp_path
+
+
+def test_query_counts_requests_including_retries(monkeypatch):
+    """--limit is a quota guard, so a retried lookup must report all 3 requests."""
+    monkeypatch.setattr(enrich_google_books.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        enrich_google_books.urllib.request,
+        "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(_http_error(503)),
+    )
+    with pytest.raises(enrich_google_books.BackendUnavailable) as e:
+        enrich_google_books._query("t", "a", retries=3)
+    assert e.value.requests == 3
+
+
+def test_query_does_not_retry_a_429(monkeypatch):
+    """A quota 429 is terminal -- retrying it just burns more quota."""
+    monkeypatch.setattr(enrich_google_books.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        enrich_google_books.urllib.request,
+        "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(_http_error(429)),
+    )
+    with pytest.raises(enrich_google_books.QuotaExceeded) as e:
+        enrich_google_books._query("t", "a", retries=3)
+    assert e.value.requests == 1
+
+
+def test_one_flaky_book_does_not_abort_the_run(books_dir, monkeypatch):
+    """Regression: BackendUnavailable used to `break`, so the first book whose
+    retries all 503'd killed the whole run -- filling 0 of 10k books."""
+
+    def flaky(title, author, api_key=None, retries=3):
+        if int(title[1:]) % 2:
+            raise enrich_google_books.BackendUnavailable("503", 3)
+        return {"description": f"d {title}"}, 1
+
+    monkeypatch.setattr(enrich_google_books, "_query", flaky)
+    assert enrich_google_books.enrich(data_dir=books_dir, limit=1000, re_embed=False) == 15
+
+
+def test_a_503_is_not_cached(books_dir, monkeypatch):
+    """Caching the failure as {} would make a later healthy run skip the book forever."""
+
+    def flaky(title, author, api_key=None, retries=3):
+        if int(title[1:]) % 2:
+            raise enrich_google_books.BackendUnavailable("503", 3)
+        return {"description": f"d {title}"}, 1
+
+    monkeypatch.setattr(enrich_google_books, "_query", flaky)
+    enrich_google_books.enrich(data_dir=books_dir, limit=1000, re_embed=False)
+    cache = json.loads((books_dir / "cache.json").read_text())
+    assert [k for k in cache if int(k) % 2] == []
+
+
+def test_limit_bounds_requests_not_books(books_dir, monkeypatch):
+    """Regression: limit counted books, so --limit 1000 could send ~3000 requests
+    against a 1000/day quota."""
+    monkeypatch.setattr(
+        enrich_google_books, "_query", lambda t, a, api_key=None, retries=3: ({"description": t}, 3)
+    )
+    assert enrich_google_books.enrich(data_dir=books_dir, limit=30, re_embed=False) == 10
+
+
+def test_gives_up_when_the_endpoint_is_down(books_dir, monkeypatch):
+    """Skipping forever would spend the whole budget on a dead endpoint, so bail
+    after MAX_CONSECUTIVE_503 books in a row fail."""
+    seen = []
+
+    def dead(title, author, api_key=None, retries=3):
+        seen.append(title)
+        raise enrich_google_books.BackendUnavailable("503", 3)
+
+    monkeypatch.setattr(enrich_google_books, "_query", dead)
+    assert enrich_google_books.enrich(data_dir=books_dir, limit=1000, re_embed=False) == 0
+    assert len(seen) == enrich_google_books.MAX_CONSECUTIVE_503
+
+
+def test_a_success_resets_the_consecutive_503_counter(books_dir, monkeypatch):
+    """Scattered 503s must not accumulate into a false 'endpoint is down' bail."""
+    calls = {"n": 0}
+
+    def mostly_flaky(title, author, api_key=None, retries=3):
+        calls["n"] += 1
+        if calls["n"] % 5:  # 4 of every 5 fail -- never 10 in a row
+            raise enrich_google_books.BackendUnavailable("503", 3)
+        return {"description": f"d {title}"}, 1
+
+    monkeypatch.setattr(enrich_google_books, "_query", mostly_flaky)
+    assert enrich_google_books.enrich(data_dir=books_dir, limit=1000, re_embed=False) == 6

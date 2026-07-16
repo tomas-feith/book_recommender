@@ -10,8 +10,9 @@ Unlike add_books, this *updates* existing books in place: it fills empty
 ``description`` (and empty ``subjects`` from Google's categories), then re-embeds
 only the changed rows so ``real_embeddings.npz`` stays consistent.
 
-Rate-limited and cached; pass ``--limit`` to bound the number of API calls (the
-free tier is ~1000/day without a key).
+Rate-limited and cached; pass ``--limit`` to bound the number of HTTP requests
+sent (the quota unit -- a book whose lookup retries costs several). The free tier
+is ~1000/day, with or without a key.
 
 Run (in the uv/torch env):
     uv run --no-sync python scripts/enrich_google_books.py --limit 200
@@ -45,15 +46,35 @@ UA = {"User-Agent": "book-rec/0.1 (catalog enrichment)"}
 CACHE = ROOT / ".cache" / "google_books.json"
 
 
-class QuotaExceeded(RuntimeError):
+class ApiError(RuntimeError):
+    """Base for API failures that carry how many HTTP requests they burned."""
+
+    def __init__(self, message: str, requests: int = 0) -> None:
+        super().__init__(message)
+        self.requests = requests
+
+
+class QuotaExceeded(ApiError):
     """Google Books returned 429 -- the anonymous quota is a shared, exhausted pool."""
 
 
-class BackendUnavailable(RuntimeError):
+class BackendUnavailable(ApiError):
     """Google Books search returned 503 backendFailed on every retry (Google-side)."""
 
 
-def _query(title: str, author: str, api_key: str | None = None, retries: int = 3) -> dict | None:
+# The search endpoint 503s intermittently even when healthy, so one book exhausting
+# its retries means nothing. This many *consecutive* exhausted books means the
+# endpoint is actually down and there is no point spending the rest of the budget.
+MAX_CONSECUTIVE_503 = 10
+
+
+def _query(
+    title: str, author: str, api_key: str | None = None, retries: int = 3
+) -> tuple[dict | None, int]:
+    """Look up one book. Returns (volumeInfo or None, HTTP requests sent).
+
+    The request count is the quota unit -- a retried book costs several.
+    """
     q = f"intitle:{title}"
     if author:
         q += f" inauthor:{author.split(',')[0]}"
@@ -61,32 +82,35 @@ def _query(title: str, author: str, api_key: str | None = None, retries: int = 3
     if api_key:
         params["key"] = api_key
     url = f"{API}?{urllib.parse.urlencode(params)}"
+    sent = 0
     for attempt in range(retries):
         try:
+            sent += 1
             return _pick(
                 json.load(
                     urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=15)
                 )
-            )
+            ), sent
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 raise QuotaExceeded(
                     "Google Books returned 429 (quota exceeded). The unauthenticated "
                     "quota is a shared pool; set GOOGLE_BOOKS_API_KEY or pass --api-key "
-                    "with a free key from console.cloud.google.com."
+                    "with a free key from console.cloud.google.com.",
+                    sent,
                 ) from e
             if e.code == 503 and attempt < retries - 1:
                 time.sleep(2 * (attempt + 1))  # backendFailed is often transient
                 continue
             if e.code == 503:
                 raise BackendUnavailable(
-                    "Google Books search returned 503 (backendFailed) on every retry. "
-                    "This is a Google-side outage of the search endpoint; try again later."
+                    "Google Books search returned 503 (backendFailed) on every retry.",
+                    sent,
                 ) from e
-            return None
+            return None, sent
         except Exception:
-            return None
-    return None
+            return None, sent
+    return None, sent
 
 
 def _pick(data: dict) -> dict | None:
@@ -122,23 +146,43 @@ def enrich(
     )
 
     changed = {}  # book_id -> book (for re-embedding)
-    calls = 0
+    calls = 0  # HTTP requests sent -- the quota unit, not books looked up
+    skipped = 0  # books given up on after their retries all 503'd
+    consecutive_503 = 0
+    checkpoint = 0
     for b in todo:
         if calls >= limit:
             break
         key = b["id"]
         if key not in cache:
             try:
-                info = _query(b["title"], b.get("author", ""), api_key)
-            except (QuotaExceeded, BackendUnavailable) as e:
+                info, sent = _query(b["title"], b.get("author", ""), api_key)
+                calls += sent
+                consecutive_503 = 0
+            except QuotaExceeded as e:
+                calls += e.requests
                 print(f"Aborting: {e}")
                 break
+            except BackendUnavailable as e:
+                # One book's retries all 503'd. That is normal for this endpoint, so
+                # drop the book and move on -- but don't cache the failure, or a later
+                # healthy run would never retry it.
+                calls += e.requests
+                skipped += 1
+                consecutive_503 += 1
+                if consecutive_503 >= MAX_CONSECUTIVE_503:
+                    print(
+                        f"Aborting: {consecutive_503} books in a row failed with 503. "
+                        "The Google Books search endpoint looks down; try again later."
+                    )
+                    break
+                continue
             cache[key] = info or {}
-            calls += 1
             time.sleep(0.2)  # be polite to the API
-            if calls % 25 == 0:
+            if calls - checkpoint >= 25:
                 CACHE.write_text(json.dumps(cache))
-                print(f"  ...{calls} calls")
+                checkpoint = calls
+                print(f"  ...{calls} calls, {len(changed)} filled, {skipped} skipped")
         info = cache[key]
         desc = (info.get("description") or "").strip()
         if desc:
@@ -149,7 +193,10 @@ def enrich(
                 b["image"] = (info.get("imageLinks") or {}).get("thumbnail", "")
             changed[key] = b
     CACHE.write_text(json.dumps(cache))
-    print(f"Filled {len(changed)} descriptions from {calls} API calls.")
+    print(
+        f"Filled {len(changed)} descriptions from {calls} API calls"
+        f"{f' ({skipped} books skipped on 503)' if skipped else ''}."
+    )
 
     if not changed:
         return 0
@@ -194,7 +241,9 @@ def _reembed(data_dir: Path, changed: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Enrich catalog books via Google Books.")
-    ap.add_argument("--limit", type=int, default=200, help="Max API calls this run.")
+    ap.add_argument(
+        "--limit", type=int, default=200, help="Max HTTP requests this run (the quota unit)."
+    )
     ap.add_argument("--no-embed", action="store_true", help="Skip re-embedding.")
     ap.add_argument("--api-key", help="Google Books API key (or set GOOGLE_BOOKS_API_KEY).")
     args = ap.parse_args()
