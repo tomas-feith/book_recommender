@@ -152,9 +152,9 @@ def test_title_match_fills_by_title_and_year(tmp_path):
     assert book["description"] == "Radch space opera."
 
 
-def test_title_match_rejects_year_mismatch(tmp_path):
-    # Same title, but the only candidate is 30 years off -> almost certainly a
-    # different book, so reject rather than mis-fill.
+def test_title_match_rejects_candidate_predating_the_work(tmp_path):
+    # An edition cannot print a book that doesn't exist yet, so a 1951 candidate for a
+    # work we date to 2021 is a different book -> reject rather than mis-fill.
     book = {
         "id": "ol:OL9W",
         "title": "Foundation",
@@ -165,6 +165,112 @@ def test_title_match_rejects_year_mismatch(tmp_path):
     }
     dump = tmp_path / "gr.json.gz"
     _write_gz(dump, [_gr("1", "Foundation", "Asimov's classic.", 1951, 9000, "w1")])
+    targets = enrich_bulk.title_targets([book])
+    assert enrich_bulk.fill_from_goodreads_titles(targets, dump) == {}
+    assert book["description"] == ""
+
+
+def test_title_match_accepts_a_reprint_decades_after_the_work(tmp_path):
+    """Regression: our `year` is the WORK's first-publication year, the dump's is the
+    EDITION's. Requiring them within a year of each other rejected every reprint --
+    e.g. an 1895 novel whose only editions are modern -- so the fallback filled 0."""
+    book = {
+        "id": "ol:OL9W",
+        "title": "The Red Badge of Courage",
+        "year": 1895,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(
+        dump,
+        [
+            _gr("1", "The Red Badge of Courage", "Crane's war novel.", 2003, 400, "w1"),
+            _gr("2", "The Red Badge of Courage", "Reissue blurb.", 2009, 9000, "w1"),
+        ],
+    )
+    targets = enrich_bulk.title_targets([book])
+    assert set(enrich_bulk.fill_from_goodreads_titles(targets, dump)) == {"ol:OL9W"}
+    assert book["description"] == "Reissue blurb."  # the canonical (most-rated) edition
+
+
+def _work(work_id, year):
+    return json.dumps({"work_id": work_id, "original_publication_year": str(year)})
+
+
+def test_works_dump_rescues_candidates_the_books_dump_leaves_undated(tmp_path):
+    """The books dump often omits publication_year entirely. The edition floor rejects
+    those (no year to stand on), but the works dump dates them -- and its
+    original_publication_year compares like-for-like with ours."""
+    book = {
+        "id": "ol:OL9W",
+        "title": "Job Satisfaction",
+        "year": 2015,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Job Satisfaction", "A workplace study.", 0, 300, "w1")])
+    targets = enrich_bulk.title_targets([book])
+    # No works dump -> the undated candidate is rejected.
+    assert enrich_bulk.fill_from_goodreads_titles(targets, dump) == {}
+
+    works = tmp_path / "works.json.gz"
+    _write_gz(works, [_work("w1", 2015)])
+    targets = enrich_bulk.title_targets([book])
+    changed = enrich_bulk.fill_from_goodreads_titles(targets, dump, works_gz=works)
+    assert set(changed) == {"ol:OL9W"}
+    assert book["description"] == "A workplace study."
+
+
+def test_works_dump_rejects_a_work_first_published_in_a_different_year(tmp_path):
+    """A same-title work whose ORIGINAL year is decades off is a different book, even
+    though its modern edition would clear the edition floor."""
+    book = {
+        "id": "ol:OL9W",
+        "title": "Future Crimes",
+        "year": 2015,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(dump, [_gr("1", "Future Crimes", "A 1999 novel, reprinted.", 2016, 900, "w1")])
+    works = tmp_path / "works.json.gz"
+    _write_gz(works, [_work("w1", 1999)])
+    targets = enrich_bulk.title_targets([book])
+    assert enrich_bulk.fill_from_goodreads_titles(targets, dump, works_gz=works) == {}
+    assert book["description"] == ""
+
+
+def test_load_work_years_only_keeps_requested_works(tmp_path):
+    """The dump has ~2.3M works; holding them all would dwarf the candidate set."""
+    works = tmp_path / "works.json.gz"
+    _write_gz(works, [_work("w1", 1999), _work("w2", 2001), _work("w3", 0)])
+    assert enrich_bulk.load_work_years(works, {"w1", "w3"}) == {"w1": 1999}
+
+
+def test_title_match_rejects_two_works_sharing_a_title_and_a_plausible_year(tmp_path):
+    """The year only prunes impossible candidates, so work_id is what settles identity:
+    two distinct works both postdating ours are indistinguishable -> skip."""
+    book = {
+        "id": "ol:OL9W",
+        "title": "The Landing Party",
+        "year": 1990,
+        "description": "",
+        "subjects": [],
+        "image": "",
+    }
+    dump = tmp_path / "gr.json.gz"
+    _write_gz(
+        dump,
+        [
+            _gr("1", "The Landing Party", "One book.", 1991, 8000, "wA"),
+            _gr("2", "The Landing Party", "A different book.", 2014, 100, "wB"),
+        ],
+    )
     targets = enrich_bulk.title_targets([book])
     assert enrich_bulk.fill_from_goodreads_titles(targets, dump) == {}
     assert book["description"] == ""

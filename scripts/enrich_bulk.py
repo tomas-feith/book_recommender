@@ -18,10 +18,15 @@ in place so ``real_embeddings.npz`` stays consistent (shared with the API enrich
 
 Download the dumps once, then run whichever you have:
     # UCSD: https://cseweb.ucsd.edu/~jmcauley/datasets/goodreads.html
+    #       (direct: https://mcauleylab.ucsd.edu/public_datasets/gdrive/goodreads/)
     # OL:   https://openlibrary.org/developers/dumps  (ol_dump_works_latest.txt.gz)
     uv run --no-sync python scripts/enrich_bulk.py \
         --goodreads goodreads_books.json.gz \
         --ol-works  ol_dump_works_latest.txt.gz
+
+Add ``--title-match --works goodreads_book_works.json.gz`` to also match the no-key
+books by title; the works dump (75MB) supplies the original publication year that
+makes that match trustworthy.
 """
 
 from __future__ import annotations
@@ -133,12 +138,19 @@ def fill_from_ol_works(targets: dict[str, dict], works_gz: Path) -> dict[str, di
 # The ol: books have no goodreads_book_id and no ISBN, so they can't key-join to the
 # goodreads dump -- but many are common titles that ARE in it. Matching on title is
 # fuzzy, and a *wrong* description is worse than a blank one (it poisons the book's
-# embedding), so this is deliberately precision-over-recall: it corroborates a title
-# with the publication year, rejects anything ambiguous, and never guesses.
+# embedding), so this is deliberately precision-over-recall: it requires the matched
+# editions to be a single work, rejects anything ambiguous, and never guesses.
 
 _PARENS = re.compile(r"[(\[].*?[)\]]")  # "(Discworld, #5)", "[UK edition]"
 _NONWORD = re.compile(r"[^a-z0-9]+")
-YEAR_TOL = 1  # editions drift a year; beyond that it's likely a different book
+# Our ``year`` is the WORK's first-publication year (what Open Library records). The books
+# dump only carries the EDITION's ``publication_year`` -- a reprint of an 1895 novel is
+# stamped 2009 -- so on its own the year can only rule out candidates that predate the work
+# (an edition cannot print a book that doesn't exist yet); it cannot confirm identity.
+# The *works* dump does carry ``original_publication_year``, which is the same quantity as
+# ours and so compares directly. Pass ``--works`` to get that stronger test; without it we
+# fall back to the edition floor. This tolerance covers data noise in either comparison.
+YEAR_TOL = 1
 # A distinctive multi-word title ("Nemesis Games") is safe on its own, but a short
 # generic one ("Alice", "Self Defense") can land on the wrong book even with a year
 # match -- so require such a title to resolve to a well-rated (i.e. canonical) edition,
@@ -165,24 +177,44 @@ def title_targets(missing: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
-def _pick_record(book: dict, recs: list[dict]) -> dict | None:
+def load_work_years(works_gz: Path, keep: set[str]) -> dict[str, int]:
+    """work_id -> original_publication_year, for the work_ids in ``keep``.
+
+    ``keep`` bounds this to the candidate works (a few thousand) rather than all ~2.3M.
+    """
+    out: dict[str, int] = {}
+    for work in stream_jsonl_gz(works_gz):
+        wid = str(work.get("work_id"))
+        if wid in keep and (y := _to_int(work.get("original_publication_year"))):
+            out[wid] = y
+    return out
+
+
+def _year_ok(rec: dict, yr: int, work_years: dict[str, int]) -> bool:
+    """Is ``rec`` plausibly an edition of a work first published in ``yr``?"""
+    if wy := work_years.get(str(rec.get("work_id"))):
+        return abs(wy - yr) <= YEAR_TOL  # like-for-like: both are first-publication years
+    # No work year (no --works, or the dump omits it): fall back to the edition floor.
+    # This also rejects records the books dump leaves undated, which is why --works
+    # recovers books whose only candidates carry no publication_year at all.
+    return bool(py := _to_int(rec.get("publication_year"))) and py >= yr - YEAR_TOL
+
+
+def _pick_record(book: dict, recs: list[dict], work_years: dict[str, int] | None = None) -> dict | None:
     """Choose the safest goodreads record for ``book``, or None if unsafe/ambiguous.
 
-    With a year: require a candidate within YEAR_TOL (else reject -- a same-title,
-    different-year book is probably a different work). Without a year: only accept if
-    the candidates are a single work (otherwise we can't tell them apart). Ties break
-    to the most-rated edition (the canonical one).
+    Identity is settled by ``work_id``, not by the year: every edition of one work shares
+    a work_id and describes the same book, so several editions are fine to choose among,
+    but several *works* is a title collision we cannot resolve -- reject rather than guess.
+    The year (see ``_year_ok``) prunes candidates that cannot be our book at all.
+    Ties break to the most-rated edition (the canonical one).
     """
     yr = book.get("year")
     if yr:
-        pool = [
-            r
-            for r in recs
-            if (py := _to_int(r.get("publication_year"))) and abs(py - yr) <= YEAR_TOL
-        ]
+        pool = [r for r in recs if _year_ok(r, yr, work_years or {})]
     else:
-        pool = recs if len({r.get("work_id") for r in recs}) == 1 else []
-    if not pool:
+        pool = list(recs)
+    if not pool or len({r.get("work_id") for r in pool}) != 1:
         return None
     best = max(pool, key=lambda r: _to_int(r.get("ratings_count")))
     n_words = len(_norm_title(book.get("title", "")).split())
@@ -192,7 +224,10 @@ def _pick_record(book: dict, recs: list[dict]) -> dict | None:
 
 
 def fill_from_goodreads_titles(
-    targets: dict[str, list[dict]], books_gz: Path, dry_run: bool = False
+    targets: dict[str, list[dict]],
+    books_gz: Path,
+    works_gz: Path | None = None,
+    dry_run: bool = False,
 ) -> dict[str, dict]:
     """Stream the goodreads dump once, collect description-bearing records per needed
     title, then resolve each book to one record (or skip if ambiguous)."""
@@ -204,6 +239,13 @@ def fill_from_goodreads_titles(
         if key in targets:
             cand.setdefault(key, []).append(raw)
 
+    # Only the candidate works are needed, so this is loaded after ``cand`` narrows them.
+    work_years: dict[str, int] = {}
+    if works_gz:
+        keep = {str(r.get("work_id")) for recs in cand.values() for r in recs}
+        work_years = load_work_years(works_gz, keep)
+        print(f"  work years: {len(work_years)} of {len(keep)} candidate works dated")
+
     # Resolve every book to a record FIRST (no mutation), so collisions can be dropped
     # before anything is written -- otherwise a discarded match would still have left a
     # wrong description on the book.
@@ -214,7 +256,7 @@ def fill_from_goodreads_titles(
         if not recs:
             continue
         for b in books:
-            rec = _pick_record(b, recs)
+            rec = _pick_record(b, recs, work_years)
             if rec is None:
                 continue
             resolved[b["id"]] = (b, rec)
@@ -244,6 +286,7 @@ def enrich(
     goodreads: Path | None = None,
     ol_works: Path | None = None,
     title_match: bool = False,
+    works: Path | None = None,
     re_embed: bool = True,
     dry_run: bool = False,
 ) -> dict[str, dict]:
@@ -269,7 +312,7 @@ def enrich(
         # Books with no key join (the OL works) matched by title+year against the same
         # goodreads dump. Runs on what's STILL missing after the key fills above.
         tt = title_targets(_missing(books))
-        got = fill_from_goodreads_titles(tt, goodreads, dry_run=dry_run)
+        got = fill_from_goodreads_titles(tt, goodreads, works_gz=works, dry_run=dry_run)
         print(f"  goodreads (title): {'would fill' if dry_run else 'filled'} {len(got)}")
         changed.update(got)
 
@@ -300,6 +343,13 @@ def main() -> None:
         help="Also match no-key books (OL works) by title+year against --goodreads.",
     )
     ap.add_argument(
+        "--works",
+        type=Path,
+        help="UCSD goodreads_book_works.json.gz. Supplies original_publication_year, "
+        "which compares like-for-like with our year (the books dump only has edition "
+        "years). Improves --title-match precision and recall.",
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="Report what the title-match would fill without writing or re-embedding.",
@@ -310,10 +360,13 @@ def main() -> None:
         ap.error("give at least one of --goodreads / --ol-works")
     if args.title_match and not args.goodreads:
         ap.error("--title-match needs --goodreads (it matches against that dump)")
+    if args.works and not args.title_match:
+        ap.error("--works only affects --title-match")
     enrich(
         goodreads=args.goodreads,
         ol_works=args.ol_works,
         title_match=args.title_match,
+        works=args.works,
         re_embed=not args.no_embed,
         dry_run=args.dry_run,
     )
