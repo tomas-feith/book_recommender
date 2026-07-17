@@ -127,6 +127,33 @@ def test_query_counts_requests_including_retries(monkeypatch):
     assert e.value.requests == 3
 
 
+def test_query_defaults_to_a_cheap_503_budget(monkeypatch):
+    """A 503 book yields nothing however many attempts it costs, so the default must
+    stay low -- an observed run spent ~580 of 1000 calls on books that failed anyway."""
+    monkeypatch.setattr(enrich_google_books.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        enrich_google_books.urllib.request,
+        "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(_http_error(503)),
+    )
+    with pytest.raises(enrich_google_books.BackendUnavailable) as e:
+        enrich_google_books._query("t", "a")  # no explicit retries -> the default
+    assert e.value.requests == enrich_google_books.RETRIES_503 <= 2
+
+
+def test_enrich_threads_the_retry_budget_through(monkeypatch, books_dir):
+    """--retries is a quota knob, so it must reach _query rather than be dropped."""
+    seen = []
+
+    def spy(title, author, api_key=None, retries=None):
+        seen.append(retries)
+        return {"description": "d"}, 1
+
+    monkeypatch.setattr(enrich_google_books, "_query", spy)
+    enrich_google_books.enrich(data_dir=books_dir, limit=3, re_embed=False, retries=1)
+    assert set(seen) == {1}
+
+
 def test_query_does_not_retry_a_429(monkeypatch):
     """A quota 429 is terminal -- retrying it just burns more quota."""
     monkeypatch.setattr(enrich_google_books.time, "sleep", lambda *_: None)

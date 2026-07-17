@@ -67,9 +67,16 @@ class BackendUnavailable(ApiError):
 # endpoint is actually down and there is no point spending the rest of the budget.
 MAX_CONSECUTIVE_503 = 10
 
+# Attempts per book before giving up on a 503. Every one costs quota, and a book that
+# 503s yields nothing however many we spend -- an observed run burned ~580 of its 1000
+# calls on 194 books that failed all 3 attempts anyway, i.e. over half the day's budget
+# bought nothing. Retries are only worth what they rescue, so keep this low and let a
+# later run (the failures are deliberately not cached) retry the endpoint when healthy.
+RETRIES_503 = 2
+
 
 def _query(
-    title: str, author: str, api_key: str | None = None, retries: int = 3
+    title: str, author: str, api_key: str | None = None, retries: int = RETRIES_503
 ) -> tuple[dict | None, int]:
     """Look up one book. Returns (volumeInfo or None, HTTP requests sent).
 
@@ -131,7 +138,11 @@ def _load_dotenv() -> None:
 
 
 def enrich(
-    data_dir: Path = DATA, limit: int = 200, re_embed: bool = True, api_key: str | None = None
+    data_dir: Path = DATA,
+    limit: int = 200,
+    re_embed: bool = True,
+    api_key: str | None = None,
+    retries: int = RETRIES_503,
 ) -> int:
     _load_dotenv()
     api_key = api_key or os.environ.get("GOOGLE_BOOKS_API_KEY")
@@ -156,7 +167,7 @@ def enrich(
         key = b["id"]
         if key not in cache:
             try:
-                info, sent = _query(b["title"], b.get("author", ""), api_key)
+                info, sent = _query(b["title"], b.get("author", ""), api_key, retries)
                 calls += sent
                 consecutive_503 = 0
             except QuotaExceeded as e:
@@ -246,8 +257,20 @@ def main() -> None:
     )
     ap.add_argument("--no-embed", action="store_true", help="Skip re-embedding.")
     ap.add_argument("--api-key", help="Google Books API key (or set GOOGLE_BOOKS_API_KEY).")
+    ap.add_argument(
+        "--retries",
+        type=int,
+        default=RETRIES_503,
+        help=f"Attempts per book before giving up on a 503 (default {RETRIES_503}). "
+        "Each attempt costs quota; raise only when the endpoint is healthy.",
+    )
     args = ap.parse_args()
-    enrich(limit=args.limit, re_embed=not args.no_embed, api_key=args.api_key)
+    enrich(
+        limit=args.limit,
+        re_embed=not args.no_embed,
+        api_key=args.api_key,
+        retries=args.retries,
+    )
 
 
 if __name__ == "__main__":
