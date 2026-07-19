@@ -49,6 +49,10 @@ REACTIONS = ("like", "dislike", "skip", "interested")  # skip == "haven't read"
 #     off the Python heap. Rebuilt only when an input changes (mtime), not per boot.
 CATALOG_DB = "catalog.db"
 SIDECAR = "real_books_added.jsonl"
+# Append-only fp16 embedding rows for on-the-fly adds, aligned row-for-row with the
+# book records in SIDECAR -- so an add appends a row instead of rewriting the ~1.5 GB
+# (at 1M) embeddings npz.
+EMB_SIDECAR = "real_embeddings_added.f16"
 # Columns mirrored out of the record for fast columnar reads (the JSON blob keeps
 # the full-fidelity record for lazy fetch).
 _COLS = ("id", "title", "author", "subjects", "language", "year")
@@ -110,6 +114,31 @@ def append_book_to_sidecar(book: dict, data_dir: Path = DATA) -> None:
     """Append one record to the sidecar (durable, O(1) -- never rewrites the base)."""
     with (data_dir / SIDECAR).open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(book, ensure_ascii=False) + "\n")
+
+
+def _emb_source(data_dir: Path = DATA) -> tuple[list[str], np.ndarray]:
+    """(ids, fp16 embeddings) from the base npz plus the append-only emb sidecar.
+
+    Base npz wins on id, so a full re-embed (which re-writes the npz over base +
+    sidecar books) supersedes any stale sidecar rows for the same ids.
+    """
+    with np.load(data_dir / "real_embeddings.npz", allow_pickle=True) as z:
+        ids = [str(x) for x in z["ids"].tolist()]
+        emb = z["emb"].astype(np.float16)
+    have = set(ids)
+    side_path, emb_path = data_dir / SIDECAR, data_dir / EMB_SIDECAR
+    if side_path.exists() and emb_path.exists():
+        side_ids = [
+            json.loads(ln)["id"]
+            for ln in side_path.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+        side = np.fromfile(emb_path, dtype="<f2").reshape(-1, emb.shape[1])
+        take = [(bid, r) for r, bid in enumerate(side_ids) if bid not in have and r < len(side)]
+        if take:
+            ids += [bid for bid, _ in take]
+            emb = np.vstack([emb, side[[r for _, r in take]]])
+    return ids, emb
 
 
 def _db_row(book: dict) -> tuple:
@@ -313,30 +342,26 @@ def append_to_catalog_files(to_add: list[dict], new_emb: np.ndarray, data_dir: P
     """Persist already-embedded new books, append-only (no base-file rewrite).
 
     ``new_emb`` is the (k, D) embedding matrix for ``to_add``. New books get pop=0
-    and empty CF rows/cols. Records go to the append-only sidecar; embeddings and
-    CF are grown in their npz files. Callers dedup first. Used by
-    ``scripts/add_books.py`` (batch) and the live service (on-demand adds) so a book
-    survives a restart; the serving DB is (re)built from base+sidecar on next load.
+    and empty CF rows/cols. Everything is append-only: fp16 embedding rows go to the
+    emb sidecar (aligned row-for-row with the book records appended to SIDECAR), and
+    CF grows sparsely -- so an add never loads/rewrites the ~1.5 GB (at 1M) embeddings
+    npz. Callers dedup first. Used by ``scripts/add_books.py`` (batch) and the live
+    service (on-demand adds); the serving DB + emb are (re)built from base+sidecar on
+    next load.
     """
-    emb_path, cf_path = data_dir / "real_embeddings.npz", data_dir / "real_cf.npz"
-    with np.load(emb_path, allow_pickle=True) as z:  # close handle before writing (Windows lock)
-        old_emb, old_ids, model = z["emb"], z["ids"].astype(str), np.array(z["model"])
+    cf_path = data_dir / "real_cf.npz"
     old_cf_ids, sim, pop = load_cf(cf_path)
-
     new_ids = [b["id"] for b in to_add]
     k = len(to_add)
-    emb = np.vstack([old_emb, new_emb]).astype(np.float16)  # keep fp16 storage
-    emb_ids = np.concatenate([old_ids, np.array(new_ids, dtype=str)])
-    n = sim.shape[0]
-    sim.resize((n + k, n + k))  # empty CF rows/cols for the new books (no data copy)
-    new_pop = np.concatenate([pop, np.zeros(k, dtype=np.float32)]).astype(np.float32)
 
-    tmp = emb_path.with_name(emb_path.stem + ".tmp.npz")
-    np.savez_compressed(tmp, ids=emb_ids, emb=emb, model=model)
-    os.replace(tmp, emb_path)
-    save_cf(cf_path, list(old_cf_ids) + new_ids, sim, new_pop)
-    for b in to_add:
+    with (data_dir / EMB_SIDECAR).open("ab") as fh:  # fp16 rows, append-only
+        fh.write(np.ascontiguousarray(new_emb, dtype="<f2").tobytes())
+    for b in to_add:  # metadata sidecar, in the SAME order as the emb rows above
         append_book_to_sidecar(b, data_dir)
+
+    sim.resize((sim.shape[0] + k, sim.shape[1] + k))  # empty CF rows/cols (no data copy)
+    new_pop = np.concatenate([pop, np.zeros(k, dtype=np.float32)]).astype(np.float32)
+    save_cf(cf_path, list(old_cf_ids) + new_ids, sim, new_pop)
 
 
 @dataclass
@@ -390,26 +415,25 @@ class Catalog:
         # numpy has no fp16 GEMV on CPU, so an fp16-resident matrix would upcast on
         # every query (~9x slower). fp16 ranking is accuracy-neutral -- the query-
         # bandwidth win lands with an fp16-native index (FAISS/pgvector) at scale.
-        with np.load(data_dir / "real_embeddings.npz", allow_pickle=True) as emb_npz:
-            emb_ids = [str(x) for x in emb_npz["ids"].tolist()]
-            cf_ids, cf_sim, cf_pop = load_cf(data_dir / "real_cf.npz")
-            keep = set(emb_ids) & set(cf_ids)  # only books with both an embedding and a CF row
+        emb_ids, emb_all = _emb_source(data_dir)  # base npz + append-only emb sidecar
+        cf_ids, cf_sim, cf_pop = load_cf(data_dir / "real_cf.npz")
+        keep = set(emb_ids) & set(cf_ids)  # only books with both an embedding and a CF row
 
-            # (Re)build the serving DB from base+sidecar only when an input changed,
-            # keyed to `keep` so DB rows stay 1:1 and in-order with emb/CF.
-            db_path = data_dir / CATALOG_DB
-            if (
-                not db_path.exists()
-                or db_path.stat().st_mtime < _newest_input_mtime(data_dir)
-                or not _has_fts(db_path)  # schema upgrade: older DBs predate the FTS table
-            ):
-                build_catalog_db(db_path, catalog_records(data_dir), keep_ids=keep)
-            table = BookTable(db_path, check_same_thread=check_same_thread)
+        # (Re)build the serving DB from base+sidecar only when an input changed,
+        # keyed to `keep` so DB rows stay 1:1 and in-order with emb/CF.
+        db_path = data_dir / CATALOG_DB
+        if (
+            not db_path.exists()
+            or db_path.stat().st_mtime < _newest_input_mtime(data_dir)
+            or not _has_fts(db_path)  # schema upgrade: older DBs predate the FTS table
+        ):
+            build_catalog_db(db_path, catalog_records(data_dir), keep_ids=keep)
+        table = BookTable(db_path, check_same_thread=check_same_thread)
 
-            order = table.ids()
-            id_to_idx = {b: i for i, b in enumerate(order)}
-            emb_pos = {b: i for i, b in enumerate(emb_ids)}
-            emb = emb_npz["emb"][[emb_pos[b] for b in order]].astype(np.float32)
+        order = table.ids()
+        id_to_idx = {b: i for i, b in enumerate(order)}
+        emb_pos = {b: i for i, b in enumerate(emb_ids)}
+        emb = emb_all[[emb_pos[b] for b in order]].astype(np.float32)
 
         cf_pos = {b: i for i, b in enumerate(cf_ids)}
         p = np.array([cf_pos[b] for b in order])

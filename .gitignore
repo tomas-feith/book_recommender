@@ -25,6 +25,7 @@ venv/
 #   catalog.db                            <- serving metadata store (built from the
 #                                            base + sidecar by Catalog.load)
 #   real_books_added.jsonl                <- append-only sidecar for on-the-fly adds
+#   real_embeddings_added.f16             <- append-only emb rows for on-the-fly adds
 #   app.db                                <- created at runtime (per-user swipes)
 data/*
 !data/.gitkeep

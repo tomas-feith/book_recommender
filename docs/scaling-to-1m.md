@@ -94,11 +94,16 @@ actually rendered. This also removes A3's need to serialize the whole file.
 > the running catalog, leaves the base JSON byte-identical, appends one sidecar line,
 > and persists across a reload.
 >
-> **Still O(N) (deferred):** the embedding/CF npz append still `vstack`s the whole
-> matrix (~1.5 GB copy at 1M) and `block_diag`s the CF matrix. Making *those*
-> append-only (memmap/segment the embeddings, grow CF sparsely) is the remaining A3
-> sub-item — a distinct storage change from the metadata store. The 800 MB JSON
-> rewrite, the worst offender, is gone.
+> **✅ Also fixed (embeddings + CF).** Adds no longer load/rewrite the ~1.5 GB
+> embeddings npz: fp16 rows go to an append-only `real_embeddings_added.f16` sidecar
+> (row-aligned with the book sidecar; base npz wins on id so a full re-embed
+> supersedes it), and the CF matrix grows with `sparse.resize` (empty rows/cols, no
+> `block_diag` copy). Validated on a real-data copy: an add leaves the base npz
+> byte-identical, writes one fp16 row, and reload round-trips the vector; CF grows in
+> place. *Remaining micro-costs:* the in-memory `Catalog.append` still `vstack`s the
+> resident emb (a RAM copy, not disk), the CF npz is still fully re-serialized on add
+> (O(nnz) I/O — segment it to fix), and the resident fp32 emb could move to a fp16
+> **memmap** now that ANN removed the full scans (RAM win at 1M).
 
 `store.append_to_catalog_files` previously ran on **every** external add:
 
