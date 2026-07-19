@@ -93,7 +93,7 @@ headings (Fraunces) over an Inter body, pill buttons.
 
 | Module | Role |
 |--------|------|
-| `app/store.py`       | `Catalog` (books + fp16 embeddings + **sparse top-k CF matrix** + popularity + **vectorized metadata filters**, one aligned index) and `SwipeStore` (users/swipes/profiles in SQLite). Split so the store can move to Postgres+pgvector without touching the rest. |
+| `app/store.py`       | `Catalog` (a lazy **SQLite-backed `BookTable`** for metadata + fp16 embeddings + **sparse top-k CF matrix** + popularity + **inverted-index metadata filters**, one aligned index) and `SwipeStore` (users/swipes/profiles in SQLite). Split so the store can move to Postgres+pgvector without touching the rest. |
 | `app/recommender.py` | Adaptive hybrid: Rocchio profile, content + CF scores, **per-item weight by rating count** (`cf_weight`); list assembly with **MMR + genre calibration**, exploit/explore, `surprise()`, `similar()` ("more like this"), and per-pick explanations. |
 | `app/search.py`      | Fuzzy **title + author** resolution for the seed step: English display titles with the original-language name (`三体`) kept as a searchable alias, and a popularity tiebreak so the canonical edition surfaces first. |
 | `app/library.py`     | Parse an uploaded reading list (CSV/TSV/TXT/XLSX) into `(title, author)` entries. |
@@ -134,6 +134,15 @@ construction it rides CF, so zero-rating cold books can't be surprises.)
 Every book is three aligned artifacts, all keyed by book id:
 `data/real_books.json` (metadata), `data/real_embeddings.npz` (content vector,
 **stored fp16** — half the file/load), `data/real_cf.npz` (item-item CF + popularity).
+
+> **Serving metadata store.** At serve time the metadata isn't held in RAM as one big
+> list of dicts — `Catalog.load` builds a SQLite store (`data/catalog.db`) from
+> `real_books.json` plus an append-only `real_books_added.jsonl` sidecar (rebuilt only
+> when an input changes). `Catalog.books` is then a **lazy `BookTable`**: full records
+> are fetched per-id on demand while the recommender's hot fields (author, subjects,
+> language, year, genre index) stay resident as columnar arrays. On-the-fly adds append
+> to the sidecar (never rewriting the base file). This keeps ~800 MB of descriptions
+> off the heap at 1M books; see [docs/scaling-to-1m.md](docs/scaling-to-1m.md) §A2/§A3.
 
 > **On fp16 embeddings.** Vectors are stored fp16 (halves the file and load
 > bandwidth) but upcast to **fp32 in RAM** for serving: numpy has no fp16 GEMV on

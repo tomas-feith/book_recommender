@@ -18,7 +18,7 @@ constants and the "+35% EASE" win were all tuned at 10k and may not transfer.
 |---|-------------|--------------|------|----------|--------|
 | 1 | Dense genre-mask matrix (`Catalog._genre_idx`) OOMs | ~150–300k books | Storage/memory (§A1) | Fatal, silent | ✅ Fixed (Phase 0) |
 | 2 | EASE-R retrain can't build (dense N×N inverse) | ~30–50k items | Algorithm/training (§B1) | Fatal | ✅ Fixed (Phase 0) |
-| 3 | Full-file rewrites on every book add | ~100k books | Storage/write-amp (§A3) | Fatal for the live-add path | Phase 0 (pending) |
+| 3 | Full-file rewrites on every book add + monolithic JSON at boot | ~100k books | Storage (§A2/§A3) | Fatal for the live-add path | ✅ Fixed (Phase 0) |
 | 4 | Linear title search (`SequenceMatcher` over all books) | ~100k books | Inference (§C) | Onboarding unusable | Phase 1 |
 | 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | Phase 1 |
 | 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | Phase 2 |
@@ -66,6 +66,16 @@ do it before any ingest past ~150k.
 
 ### A2. Monolithic JSON catalog loaded whole
 
+> **✅ Fixed (Phase 0).** Serving now reads a SQLite store (`data/catalog.db`) built
+> from `real_books.json` (+ an append-only sidecar) only when an input changes.
+> `Catalog.books` is a lazy `BookTable`: full records (descriptions/images) are
+> fetched per-id on demand, while the recommender's hot fields (author, subjects,
+> language, year, genre index) are resident columnar arrays built in one scan.
+> Validated on the real 22,630-book catalog: byte-identical order/`emb`/`sim`/`pop`,
+> identical `filter_mask` (200 combos) and `recommend`/`next_cards`/`surprise`/
+> `similar` output vs the old list-based `Catalog`; resident `books` metadata 34 MB →
+> ~0 (descriptions off-heap, ~1.5 GB saved at 1M). The original analysis follows.
+
 `real_books.json` is 18 MB at 22.6k → **~800 MB at 1M**, `json.load`-ed entirely
 (`eval.data.load_books`, `Catalog.load`) into 1M Python dicts (multi-GB heap beyond
 the raw bytes). Startup latency and RSS both balloon.
@@ -77,7 +87,20 @@ actually rendered. This also removes A3's need to serialize the whole file.
 
 ### A3. Write amplification — O(N) work per single book add
 
-`store.append_to_catalog_files` runs on **every** external add:
+> **✅ Fixed (Phase 0), metadata side.** `append_to_catalog_files` now appends the
+> record to `data/real_books_added.jsonl` (O(1), the base `real_books.json` is never
+> rewritten) and `Catalog.append` grows the resident filter arrays incrementally (no
+> full genre-mask rebuild). Validated on a real-data copy: a live add is visible in
+> the running catalog, leaves the base JSON byte-identical, appends one sidecar line,
+> and persists across a reload.
+>
+> **Still O(N) (deferred):** the embedding/CF npz append still `vstack`s the whole
+> matrix (~1.5 GB copy at 1M) and `block_diag`s the CF matrix. Making *those*
+> append-only (memmap/segment the embeddings, grow CF sparsely) is the remaining A3
+> sub-item — a distinct storage change from the metadata store. The 800 MB JSON
+> rewrite, the worst offender, is gone.
+
+`store.append_to_catalog_files` previously ran on **every** external add:
 
 - `np.vstack([old_emb, new])` copies the entire **~1.5 GB** embedding matrix,
 - `sparse.block_diag` rebuilds the whole CF matrix,
@@ -276,7 +299,11 @@ under the 2.1B limit. No overflow risk there.)*
    output identical on the real catalog.
 2. ✅ **Done.** CF training off dense EASE → head-only EASE (B1). Validated:
    bit-for-bit identical to old EASE below the budget; dense inverse now bounded.
-3. ⏳ Metadata + swipes + staged adds → SQLite/Parquet; append-only adds (A2/A3).
+3. ✅ **Done.** Metadata → SQLite serving store with lazy records + columnar boot
+   (A2); append-only adds via sidecar (A3, metadata side). Validated: identical
+   serving output vs the old list `Catalog`, full records off-heap, base JSON never
+   rewritten on add. *Remaining:* append-only **embeddings/CF** npz (still O(N) per
+   add) and folding the swipe log — follow-on to this slice.
 
 **Phase 1 — make serving sublinear:**
 

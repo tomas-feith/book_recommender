@@ -22,6 +22,9 @@ venv/
 #   coread-encoder/                       <- finetune_coread.py   (~130MB)
 #   real_embeddings.npz                   <- build_embeddings.py
 #   real_cf.npz                           <- refresh.py / cf_build.py
+#   catalog.db                            <- serving metadata store (built from the
+#                                            base + sidecar by Catalog.load)
+#   real_books_added.jsonl                <- append-only sidecar for on-the-fly adds
 #   app.db                                <- created at runtime (per-user swipes)
 data/*
 !data/.gitkeep
