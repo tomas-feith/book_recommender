@@ -327,13 +327,14 @@ def append_to_catalog_files(to_add: list[dict], new_emb: np.ndarray, data_dir: P
     k = len(to_add)
     emb = np.vstack([old_emb, new_emb]).astype(np.float16)  # keep fp16 storage
     emb_ids = np.concatenate([old_ids, np.array(new_ids, dtype=str)])
-    grown = sparse.block_diag([sim, sparse.csr_matrix((k, k))], format="csr")
+    n = sim.shape[0]
+    sim.resize((n + k, n + k))  # empty CF rows/cols for the new books (no data copy)
     new_pop = np.concatenate([pop, np.zeros(k, dtype=np.float32)]).astype(np.float32)
 
     tmp = emb_path.with_name(emb_path.stem + ".tmp.npz")
     np.savez_compressed(tmp, ids=emb_ids, emb=emb, model=model)
     os.replace(tmp, emb_path)
-    save_cf(cf_path, list(old_cf_ids) + new_ids, grown, new_pop)
+    save_cf(cf_path, list(old_cf_ids) + new_ids, sim, new_pop)
     for b in to_add:
         append_book_to_sidecar(b, data_dir)
 
@@ -451,9 +452,7 @@ class Catalog:
         i = len(self.books)
         self.books.append(book)  # BookTable INSERT (live DB) or list.append (tests)
         self.emb = np.vstack([self.emb, np.asarray(emb_vec, dtype=self.emb.dtype)[None, :]])
-        self.sim = sparse.block_diag(
-            [self.sim, sparse.csr_matrix((1, 1), dtype=self.sim.dtype)], format="csr"
-        ).tocsr()
+        self.sim.resize((i + 1, i + 1))  # grow CF sparsely: empty row/col, no data copy
         self.pop = np.append(self.pop, np.float32(0.0))
         self.id_to_idx[book["id"]] = i
         self._authors = np.append(self._authors, book.get("author", "") or "")
