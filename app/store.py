@@ -115,7 +115,11 @@ class Catalog:
     # numpy instead of a per-book Python loop on every recommendation.
     _lang: np.ndarray = field(init=False, repr=False)
     _year: np.ndarray = field(init=False, repr=False)
-    _genre_mask: dict[str, np.ndarray] = field(init=False, repr=False, default_factory=dict)
+    # Inverted index: subject -> int32 array of the book rows carrying it. A dense
+    # {subject: bool[N]} mask costs G*N bytes -- ~200 MB at 22k books, tens-to-hundreds
+    # of GB at 1M (G grows with the catalog). The index is O(total tags) instead
+    # (~0.4 MB at 22k) and scatters into a mask in O(hits), not O(N)-per-genre.
+    _genre_idx: dict[str, np.ndarray] = field(init=False, repr=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self._lang = np.array([(b.get("language") or "").lower() for b in self.books], dtype=object)
@@ -123,14 +127,11 @@ class Catalog:
             [b["year"] if b.get("year") is not None else np.nan for b in self.books],
             dtype=np.float64,
         )
-        gm: dict[str, np.ndarray] = {}
+        rows_by_genre: dict[str, list[int]] = {}
         for i, b in enumerate(self.books):
             for s in b.get("subjects", []) or []:
-                arr = gm.get(s.lower())
-                if arr is None:
-                    arr = gm[s.lower()] = np.zeros(len(self.books), dtype=bool)
-                arr[i] = True
-        self._genre_mask = gm
+                rows_by_genre.setdefault(s.lower(), []).append(i)
+        self._genre_idx = {s: np.array(rows, dtype=np.int32) for s, rows in rows_by_genre.items()}
 
     @classmethod
     def load(cls, data_dir: Path = DATA) -> Catalog:
@@ -201,9 +202,9 @@ class Catalog:
         if genres:
             gmask = np.zeros(len(self), dtype=bool)
             for g in genres:
-                arr = self._genre_mask.get(g.lower())
-                if arr is not None:
-                    gmask |= arr
+                rows = self._genre_idx.get(g.lower())
+                if rows is not None:
+                    gmask[rows] = True
             mask &= gmask
         if year_min is not None:  # NaN (missing year) compares False -> excluded, as before
             mask &= self._year >= year_min
