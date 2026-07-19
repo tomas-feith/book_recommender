@@ -200,7 +200,9 @@ def _year_ok(rec: dict, yr: int, work_years: dict[str, int]) -> bool:
     return bool(py := _to_int(rec.get("publication_year"))) and py >= yr - YEAR_TOL
 
 
-def _pick_record(book: dict, recs: list[dict], work_years: dict[str, int] | None = None) -> dict | None:
+def _pick_record(
+    book: dict, recs: list[dict], work_years: dict[str, int] | None = None
+) -> dict | None:
     """Choose the safest goodreads record for ``book``, or None if unsafe/ambiguous.
 
     Identity is settled by ``work_id``, not by the year: every edition of one work shares
