@@ -44,8 +44,8 @@ def get_service() -> BookRecommenderService:
 @st.cache_resource
 def filter_options():
     svc = get_service()
-    langs = sorted({(b.get("language") or "en") for b in svc.catalog.books})
-    years = sorted(b["year"] for b in svc.catalog.books if b.get("year"))
+    langs = svc.catalog.languages()
+    years = svc.catalog.years()
     floor = years[len(years) * YEAR_FLOOR_PCT // 100] // 10 * 10  # round down to the decade
     return {
         "languages": langs,

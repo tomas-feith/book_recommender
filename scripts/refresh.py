@@ -50,8 +50,9 @@ SWIPE_RATING = {"like": 5.0, "interested": 4.0, "dislike": 2.0}
 
 
 def _catalog_order() -> list[str]:
-    books = json.loads((DATA / "real_books.json").read_text(encoding="utf-8"))
-    return [b["id"] for b in books]
+    from app.store import catalog_records  # base real_books.json + append-only sidecar
+
+    return [b["id"] for b in catalog_records(DATA)]
 
 
 def _eval_user_ids() -> set:

@@ -171,7 +171,7 @@ class Recommender:
         Discworld fan got the cap twice over. Matching on *any* shared credit closes
         that, and still dedupes 'Rowling, GrandPré' against plain 'Rowling'.
         """
-        raw = self.cat.books[book_idx].get("author", "") or ""
+        raw = self.cat.author(book_idx)
         return [p for part in raw.split(",") if (p := part.strip().lower()) and p not in _SUFFIXES]
 
     def _cap_hit(self, keys: list[str], counts: dict[str, int], per_author: int) -> bool:
@@ -336,12 +336,12 @@ class Recommender:
         return order[np.argsort(combined)]
 
     def _book_genre_mass(self, i: int) -> dict[str, float]:
-        subs = self.cat.books[i].get("subjects", []) or []
+        subs = self.cat.subjects(i)
         return {s: 1.0 / len(subs) for s in subs} if subs else {}
 
     def _genre_target(self, liked, interested) -> dict[str, float]:
         """The user's taste genre distribution (likes full weight, interest ALPHA)."""
-        subs = [self.cat.books[i].get("subjects", []) for i in list(liked) + list(interested)]
+        subs = [self.cat.subjects(i) for i in list(liked) + list(interested)]
         weights = [1.0] * len(liked) + [ALPHA] * len(interested)
         return genre_distribution(subs, weights)
 

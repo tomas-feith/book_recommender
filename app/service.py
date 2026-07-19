@@ -54,7 +54,7 @@ class BookRecommenderService:
         check_same_thread: bool = True,
     ):
         self.data_dir = data_dir
-        self.catalog = Catalog.load(data_dir)
+        self.catalog = Catalog.load(data_dir, check_same_thread=check_same_thread)
         self.recommender = Recommender(self.catalog)
         self.titles = TitleIndex(self.catalog)
         self.store = SwipeStore(db_path or data_dir / "app.db", check_same_thread=check_same_thread)

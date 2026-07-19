@@ -73,7 +73,9 @@ def _atomic_savez(path: Path, **arrays) -> None:
 
 
 def _load_books(data_dir: Path) -> list[dict]:
-    return json.loads((data_dir / "real_books.json").read_text(encoding="utf-8"))
+    from app.store import catalog_records  # base real_books.json + append-only sidecar
+
+    return catalog_records(data_dir)
 
 
 # ---- helpers -----------------------------------------------------------------

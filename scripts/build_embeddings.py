@@ -20,7 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
-from eval.data import book_to_text, load_books
+from app.store import catalog_records
+from eval.data import book_to_text
 from eval.embedders import SentenceTransformerEmbedder
 
 BASE_MODEL = "BAAI/bge-small-en-v1.5"
@@ -30,7 +31,7 @@ COREAD_ENCODER = DATA / "coread-encoder"
 
 
 def main() -> None:
-    books = load_books(DATA / "real_books.json")
+    books = catalog_records(DATA)  # base real_books.json + append-only sidecar
     model = str(COREAD_ENCODER) if COREAD_ENCODER.exists() else BASE_MODEL
     label = "coread-finetuned bge-small" if COREAD_ENCODER.exists() else BASE_MODEL
     print(f"Embedding {len(books)} books with {label} ...")
