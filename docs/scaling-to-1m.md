@@ -22,7 +22,7 @@ constants and the "+35% EASE" win were all tuned at 10k and may not transfer.
 | 4 | Linear title search (`SequenceMatcher` over all books) | ~100k books | Inference (§C) | Onboarding unusable | ✅ Fixed (Phase 1, FTS) |
 | 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | ✅ Fixed (Phase 1, FAISS) |
 | 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | Phase 2 |
-| 7 | Dedup / language / selection hygiene | any large ingest | Data source (§F) | Quality | Phase 1 |
+| 7 | Dedup / language / selection hygiene | any large ingest | Data source (§F) | Quality | ✅ Fixed (dedup/lang/selection); subjects/coverage remain |
 
 > **Latent break resolved.** `scripts/refresh.py` (the operational CF retrain) called
 > `ease_cf`, which capped out around 30–50k items (§B1) — a live risk on the *current*
@@ -284,6 +284,17 @@ re-measured.
 ---
 
 ## F. Data source & hygiene
+
+> **✅ Partly fixed (Phase 1) — `scripts/hygiene.py`.** Three ingest-time fixes:
+> **dedup** (`dedup_records`: group by normalized title+author, keep the most-complete
+> edition; precision-first — needs both title AND author, so distinct unattributed
+> works are never merged), **language** (`guess_language`: Unicode-script guess from
+> the *title*, replacing the OL dump's hardcoded `"en"`), and **selection** (OL
+> `select_works` now keeps the top-N by a quality score in a heap, not dump order).
+> Wired into `ingest_openlibrary_dump` and `add_books`. Validated on the real catalog:
+> 28 author-confirmed dups removed (Harry Potter #5 etc.), 150 non-Latin titles get a
+> real language (was all `"en"`), zero false positives. **Still open:** a canonical
+> genre *taxonomy* (subject vocab explosion) and description-coverage tracking.
 
 - **Duplicates.** The OL dump is full of near-duplicate works/editions/translations.
   At 1M, result lists fill with the same book repeated; MMR and the author-cap only

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import heapq
 import json
 import re
 import sys
@@ -37,6 +38,8 @@ from scipy import sparse
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+
+from hygiene import dedup_records, guess_language  # noqa: E402
 
 from eval.data import book_to_text  # noqa: E402
 
@@ -72,15 +75,34 @@ def _author_keys(work: dict) -> list[str]:
     return out
 
 
+def _quality(work: dict) -> int:
+    """A crude quality score so selection keeps the *best* works, not dump-order ones:
+    a longer description, a cover, and more subjects all signal a fleshed-out work."""
+    covers = [c for c in work.get("covers", []) if isinstance(c, int) and c > 0]
+    subs = [s for s in work.get("subjects", []) if isinstance(s, str)]
+    return (
+        min(len(_text(work.get("description"))) // 200, 5)
+        + (2 if covers else 0)
+        + min(len(subs), 3)
+    )
+
+
 def select_works(works_path: Path, top_n: int) -> list[dict]:
-    """First ``top_n`` works that have a title AND a description."""
-    out: list[dict] = []
-    for work in stream_dump(works_path):
-        if work.get("title") and _text(work.get("description")):
-            out.append(work)
-            if len(out) >= top_n:
-                break
-    return out
+    """The ``top_n`` highest-quality works with a title AND a description.
+
+    Streams once, keeping the best ``top_n`` by :func:`_quality` in a min-heap
+    (dump order was arbitrary -- the first works in the file, not the best).
+    """
+    heap: list[tuple[int, int, dict]] = []
+    for i, work in enumerate(stream_dump(works_path)):
+        if not (work.get("title") and _text(work.get("description"))):
+            continue
+        q = _quality(work)
+        if len(heap) < top_n:
+            heapq.heappush(heap, (q, i, work))
+        elif q > heap[0][0]:
+            heapq.heapreplace(heap, (q, i, work))
+    return [w for _, _, w in sorted(heap, key=lambda t: -t[0])]
 
 
 def load_author_names(authors_path: Path | None, needed: set) -> dict[str, str]:
@@ -104,12 +126,16 @@ def to_record(work: dict, authors: dict[str, str]) -> dict:
     year = None
     if m := _YEAR_RE.search(_text(work.get("first_publish_date"))):
         year = int(m.group(0))
+    title = work.get("title", "")
     return {
         "id": "ol:" + key.rsplit("/", 1)[-1],
-        "title": work.get("title", ""),
+        "title": title,
         "author": ", ".join(author_names),
         "subjects": [s.lower() for s in work.get("subjects", []) if isinstance(s, str)][:5],
-        "language": "en",
+        # The works dump has no reliable language, so guess from the title's script
+        # instead of stamping every book "en" (which broke the filter). Title only --
+        # a description can quote other scripts (a Greek excerpt in an English edition).
+        "language": guess_language(title),
         "year": year,
         "image": f"https://covers.openlibrary.org/b/id/{covers[0]}-M.jpg" if covers else "",
         "description": _text(work.get("description"))[:800],
@@ -126,6 +152,9 @@ def ingest(works_path, authors_path, top_n, data_dir=DATA):
     print(f"  {len(works)} works; resolving {len(needed)} authors...")
     authors = load_author_names(authors_path, needed)
     books = [to_record(w, authors) for w in works]
+    n_raw = len(books)
+    books = dedup_records(books)  # drop near-duplicate works (editions/translations)
+    print(f"  {n_raw} works -> {len(books)} after dedup")
     order = [b["id"] for b in books]
 
     model = "BAAI/bge-small-en-v1.5"

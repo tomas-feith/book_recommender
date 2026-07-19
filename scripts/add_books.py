@@ -117,16 +117,23 @@ def add_books(new_records: Iterable[dict], data_dir: Path = DATA, model: str | N
 
     Returns the number of books actually added (0 if all were already present).
     """
+    from hygiene import dedup_key  # sibling script
+
     books = _load_books(data_dir)
     known = {b["id"] for b in books}
+    known_keys = {dedup_key(b) for b in books}  # (title, author) already in the catalog
 
-    to_add, seen = [], set()
+    to_add, seen_ids, seen_keys = [], set(), set()
     for rec in new_records:
         norm = _normalize(rec)
-        if norm["id"] in known or norm["id"] in seen:
-            continue  # idempotent: skip existing and in-batch duplicates
+        key = dedup_key(norm)
+        if norm["id"] in known or norm["id"] in seen_ids:
+            continue  # idempotent: skip existing and in-batch id duplicates
+        if key[0] and (key in known_keys or key in seen_keys):
+            continue  # near-duplicate work (same title+author) already present/queued
         to_add.append(norm)
-        seen.add(norm["id"])
+        seen_ids.add(norm["id"])
+        seen_keys.add(key)
 
     if not to_add:
         print("Nothing to add -- all books already in the catalog.")
