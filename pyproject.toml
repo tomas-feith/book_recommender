@@ -79,6 +79,7 @@ omit = [
     "eval/cold_start.py",
     "eval/diversity.py",
     "eval/learned_rerank.py",
+    "eval/served_eval.py",
 ]
 
 [tool.coverage.report]

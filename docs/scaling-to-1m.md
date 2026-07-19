@@ -21,7 +21,7 @@ constants and the "+35% EASE" win were all tuned at 10k and may not transfer.
 | 3 | Full-file rewrites on every book add + monolithic JSON at boot | ~100k books | Storage (§A2/§A3) | Fatal for the live-add path | ✅ Fixed (Phase 0) |
 | 4 | Linear title search (`SequenceMatcher` over all books) | ~100k books | Inference (§C) | Onboarding unusable | ✅ Fixed (Phase 1, FTS) |
 | 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | ✅ Fixed (Phase 1, FAISS) |
-| 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | Phase 2 |
+| 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | 🚧 Phase 2 started (`eval/served_eval`) |
 | 7 | Dedup / language / selection hygiene | any large ingest | Data source (§F) | Quality | ✅ Fixed (dedup/lang/selection); subjects/coverage remain |
 
 > **Latent break resolved.** `scripts/refresh.py` (the operational CF retrain) called
@@ -268,6 +268,23 @@ genre/language/year facets once into small artifacts.
 ---
 
 ## E. Evaluation validity & tuning transfer
+
+> **🚧 Phase 2 started — `eval/served_eval.py`.** A stratified eval that drives the
+> *served* stack (`Catalog` + `Recommender` + FAISS), not the research recommenders:
+> it blinds a fraction of books cold (out of CF + popularity, embeddings intact), holds
+> out liked books, and reports Recall@K split **warm/cold**, catalog **coverage**, and
+> per-call **latency**, exact vs ANN. First run on the real 22.6k catalog (40% cold)
+> already surfaced two things the head-Recall number hides:
+> - **cold Recall@10 ≈ 0** (vs warm 0.33): in a mixed catalog the CF-warm head dominates
+>   the ranking and crowds cold, content-only books out of the top-10 — so brand-new /
+>   tail books barely surface. This is the "+35% CF is head-only" warning made concrete,
+>   and the thing to fix (a cold-start exploration/boost) and then measure here.
+> - **coverage ≈ 2%**: recommendations concentrate on a small popular head.
+> - ANN keeps warm Recall (0.33→0.33) and is ~5× faster even at 22.6k.
+>
+> Still to do: re-tune the constants below against this harness, run it on a real
+> (or stratified-sample) large catalog, and re-validate the encoder choice. The
+> original analysis follows.
 
 Every constant and conclusion was fit on ≤10k warm, popular, mostly-English books:
 
