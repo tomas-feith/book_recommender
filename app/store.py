@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -151,10 +152,36 @@ def build_catalog_db(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
+        # Trigram FTS over title/original-title/author for sublinear onboarding search
+        # (replaces the O(N) SequenceMatcher scan). rowid == books.idx, so a match maps
+        # straight back to a catalog row.
+        conn.execute(
+            "CREATE VIRTUAL TABLE books_fts USING fts5("
+            "title, orig_title, author, tokenize='trigram')"
+        )
+        conn.execute(
+            "INSERT INTO books_fts(rowid, title, orig_title, author) "
+            "SELECT idx, title, COALESCE(json_extract(data, '$.orig_title'), ''), author FROM books"
+        )
         conn.commit()
     finally:
         conn.close()
     os.replace(tmp, db_path)
+
+
+def _has_fts(db_path: Path) -> bool:
+    """Whether an existing DB carries the FTS table (else it predates it -> rebuild)."""
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='books_fts'"
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
 
 
 class BookTable:
@@ -234,16 +261,47 @@ class BookTable:
 
     def append(self, book: dict) -> int:
         with self._lock:
-            row = _db_row(book)
-            self.conn.execute(
+            cur = self.conn.execute(
                 "INSERT INTO books (id, title, author, subjects, language, year, data) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                row,
+                _db_row(book),
+            )
+            self.conn.execute(
+                "INSERT INTO books_fts(rowid, title, orig_title, author) VALUES (?, ?, ?, ?)",
+                (
+                    cur.lastrowid,
+                    book.get("title", ""),
+                    book.get("orig_title", "") or "",
+                    book.get("author", "") or "",
+                ),
             )
             self.conn.commit()
             i = self._n
             self._n += 1
             return i
+
+    def search_fts(self, query: str, limit: int = 200) -> list[int]:
+        """Candidate positions (0-based) trigram-matching ``query`` in title/author.
+
+        Recall-oriented: any query word (>=3 chars, trigram-searchable) OR-matched,
+        best bm25 first. The precise ranking is left to the reranker in ``TitleIndex``.
+        Short/CJK queries fall back to a bounded substring scan.
+        """
+        words = [w for w in re.findall(r"\w+", query.lower()) if len(w) >= 3]
+        with self._lock:
+            if words:
+                expr = " OR ".join(f'"{w}"' for w in words)
+                rows = self.conn.execute(
+                    "SELECT rowid FROM books_fts WHERE books_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (expr, limit),
+                ).fetchall()
+            else:
+                like = f"%{query.strip()}%"
+                rows = self.conn.execute(
+                    "SELECT idx FROM books WHERE title LIKE ? OR author LIKE ? LIMIT ?",
+                    (like, like, limit),
+                ).fetchall()
+        return [r[0] - 1 for r in rows]  # rowid/idx is 1-based -> 0-based position
 
     def close(self) -> None:
         self.conn.close()
@@ -333,7 +391,11 @@ class Catalog:
             # (Re)build the serving DB from base+sidecar only when an input changed,
             # keyed to `keep` so DB rows stay 1:1 and in-order with emb/CF.
             db_path = data_dir / CATALOG_DB
-            if not db_path.exists() or db_path.stat().st_mtime < _newest_input_mtime(data_dir):
+            if (
+                not db_path.exists()
+                or db_path.stat().st_mtime < _newest_input_mtime(data_dir)
+                or not _has_fts(db_path)  # schema upgrade: older DBs predate the FTS table
+            ):
                 build_catalog_db(db_path, catalog_records(data_dir), keep_ids=keep)
             table = BookTable(db_path, check_same_thread=check_same_thread)
 
