@@ -53,6 +53,12 @@ SIDECAR = "real_books_added.jsonl"
 # book records in SIDECAR -- so an add appends a row instead of rewriting the ~1.5 GB
 # (at 1M) embeddings npz.
 EMB_SIDECAR = "real_embeddings_added.f16"
+# Derived serving artifacts (rebuilt with catalog.db when an input changes): the
+# embeddings as a fp16 memmap in catalog order (so they aren't all resident -- the
+# ANN retrieval removed the full scans that needed a resident fp32 matrix), and the
+# persisted FAISS index (so a boot loads it instead of retraining).
+EMB_SERVING = "emb.f16"
+ANN_IDX = "ann.idx"
 # Columns mirrored out of the record for fast columnar reads (the JSON blob keeps
 # the full-fidelity record for lazy fetch).
 _COLS = ("id", "title", "author", "subjects", "language", "year")
@@ -407,39 +413,63 @@ class Catalog:
             for s in subs:
                 rows_by_genre.setdefault(s.lower(), []).append(i)
         self._genre_idx = {s: np.array(rows, dtype=np.int32) for s, rows in rows_by_genre.items()}
-        self.ann = ANNIndex.build(self.emb)
+        # ``ann`` is set by ``load`` (built/persisted there); a directly-constructed
+        # Catalog (tests) leaves it None -> exact scan.
 
     @classmethod
     def load(cls, data_dir: Path = DATA, check_same_thread: bool = True) -> Catalog:
-        # Embeddings are stored fp16 (half the file + load), but kept fp32 in RAM:
-        # numpy has no fp16 GEMV on CPU, so an fp16-resident matrix would upcast on
-        # every query (~9x slower). fp16 ranking is accuracy-neutral -- the query-
-        # bandwidth win lands with an fp16-native index (FAISS/pgvector) at scale.
-        emb_ids, emb_all = _emb_source(data_dir)  # base npz + append-only emb sidecar
         cf_ids, cf_sim, cf_pop = load_cf(data_dir / "real_cf.npz")
-        keep = set(emb_ids) & set(cf_ids)  # only books with both an embedding and a CF row
-
-        # (Re)build the serving DB from base+sidecar only when an input changed,
-        # keyed to `keep` so DB rows stay 1:1 and in-order with emb/CF.
-        db_path = data_dir / CATALOG_DB
-        if (
+        db_path, emb_path, ann_path = (
+            data_dir / CATALOG_DB,
+            data_dir / EMB_SERVING,
+            data_dir / ANN_IDX,
+        )
+        db_stale = (
             not db_path.exists()
             or db_path.stat().st_mtime < _newest_input_mtime(data_dir)
             or not _has_fts(db_path)  # schema upgrade: older DBs predate the FTS table
-        ):
-            build_catalog_db(db_path, catalog_records(data_dir), keep_ids=keep)
-        table = BookTable(db_path, check_same_thread=check_same_thread)
+        )
+        # Rebuild the derived serving artifacts (DB, emb memmap, ANN) only when an input
+        # changed. On a steady-state boot none of this touches the base npz -- we memmap
+        # emb.f16 and read the persisted index, keeping RAM off the full fp32 matrix.
+        rebuild = db_stale or not emb_path.exists()
+        if rebuild:
+            emb_ids, emb_all = _emb_source(data_dir)  # base npz + emb sidecar (transient)
+            keep = set(emb_ids) & set(cf_ids)  # need both an embedding and a CF row
+            if db_stale:
+                build_catalog_db(db_path, catalog_records(data_dir), keep_ids=keep)
 
+        table = BookTable(db_path, check_same_thread=check_same_thread)
         order = table.ids()
         id_to_idx = {b: i for i, b in enumerate(order)}
-        emb_pos = {b: i for i, b in enumerate(emb_ids)}
-        emb = emb_all[[emb_pos[b] for b in order]].astype(np.float32)
+
+        if rebuild:  # materialize emb.f16 in catalog order (fp16), then memmap it
+            emb_pos = {b: i for i, b in enumerate(emb_ids)}
+            ordered = emb_all[[emb_pos[b] for b in order]].astype("<f2")
+            tmp = emb_path.with_suffix(".f16.tmp")
+            ordered.tofile(tmp)
+            os.replace(tmp, emb_path)
+            dim = ordered.shape[1]
+        else:
+            dim = emb_path.stat().st_size // 2 // max(len(order), 1)  # fp16 = 2 bytes
+        emb = np.memmap(emb_path, dtype="<f2", mode="r", shape=(len(order), dim))
 
         cf_pos = {b: i for i, b in enumerate(cf_ids)}
         p = np.array([cf_pos[b] for b in order])
         sim = cf_sim[p][:, p].tocsr()  # reorder rows AND columns to catalog order
         pop = cf_pop[p]
-        return cls(table, emb, sim, pop, id_to_idx)
+        cat = cls(table, emb, sim, pop, id_to_idx)
+
+        # ANN index: load the persisted one, or (re)build + persist when emb changed.
+        if rebuild or not ann_path.exists():
+            cat.ann = ANNIndex.build(emb)
+            if cat.ann is not None:
+                cat.ann.save(ann_path)
+            elif ann_path.exists():
+                ann_path.unlink()  # stale index for a now-too-small catalog
+        else:
+            cat.ann = ANNIndex.load(ann_path)
+        return cat
 
     def __len__(self) -> int:
         return len(self.books)

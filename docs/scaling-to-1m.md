@@ -101,9 +101,8 @@ actually rendered. This also removes A3's need to serialize the whole file.
 > `block_diag` copy). Validated on a real-data copy: an add leaves the base npz
 > byte-identical, writes one fp16 row, and reload round-trips the vector; CF grows in
 > place. *Remaining micro-costs:* the in-memory `Catalog.append` still `vstack`s the
-> resident emb (a RAM copy, not disk), the CF npz is still fully re-serialized on add
-> (O(nnz) I/O — segment it to fix), and the resident fp32 emb could move to a fp16
-> **memmap** now that ANN removed the full scans (RAM win at 1M).
+> emb once per add (a RAM copy, not disk), and the CF npz is still fully re-serialized
+> on add (O(nnz) I/O — segment it to fix).
 
 `store.append_to_catalog_files` previously ran on **every** external add:
 
@@ -209,6 +208,13 @@ content retrieval quality (§C) and data hygiene (§F), not to squeezing CF.
 >   34× faster than a full scan at 1M (3.3 ms vs 111 ms). **`surprise` stays a full scan**
 >   on purpose — it gates on the whole-catalog score/novelty distribution, which a
 >   retrieved subset would distort; it's the occasional tab, not the hot path.
+> - **Embeddings → fp16 memmap + IVF-PQ index** (§A2 RAM). `Catalog.emb` is now a fp16
+>   memmap (paged, not a resident fp32 matrix — safe because ANN removed the full
+>   scans), and the FAISS index is **IVF-PQ** (compressed) and **persisted** so a boot
+>   loads it instead of retraining. Validated: memmap == fp32 recommender output
+>   (rec/similar 100%), IVF-PQ vs exact rec 95.6% / similar 98.3% (exact rerank on the
+>   memmap vectors keeps quality), index **114 B/vec** (13.5× smaller → ~114 MB at 1M
+>   vs 1.5 GB), steady-state boot 0.5 s (no npz parse).
 >
 > The original analysis follows.
 
