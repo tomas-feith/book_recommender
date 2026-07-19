@@ -162,6 +162,34 @@ class Recommender:
                 mask[self.cat.id_to_idx[bid]] = False
         return mask
 
+    def _cf_neighbors(self, liked, interested) -> np.ndarray:
+        """Row indices that co-occur (in the CF matrix) with the taste set."""
+        rows = list(liked) + list(interested)
+        if not rows:
+            return np.array([], dtype=np.int64)
+        return np.unique(self.cat.sim[rows].indices)
+
+    def _candidates(self, liked, disliked, interested, reactions, filters, want: int) -> np.ndarray:
+        """The rows to actually score -- **retrieve-then-rerank**.
+
+        With no ANN index (small catalog / faiss absent) or no taste yet, this is
+        the exact filtered set, so behaviour is identical to a full scan. Otherwise
+        it's the content-ANN top-K UNION the CF neighbours of the taste set, then
+        filtered + de-seen -- a few hundred rows instead of the whole catalog, so the
+        blend/MMR downstream stay sublinear. ``want`` sizes the retrieval.
+
+        (``surprise`` deliberately does *not* use this: it needs the whole-catalog
+        novelty/score distribution as its gate reference, so it stays a full scan.)
+        """
+        mask = self._candidate_mask(reactions, filters)
+        profile = self._profile(liked, disliked, interested)
+        if self.cat.ann is None or profile is None:
+            return np.where(mask)[0]
+        near = self.cat.ann.search(profile, max(8 * want, 2000))
+        cf = self._cf_neighbors(liked, interested)
+        cand = np.unique(np.concatenate([near, cf])) if len(cf) else np.unique(near)
+        return cand[mask[cand]] if len(cand) else np.array([], dtype=np.int64)
+
     def _author_keys(self, book_idx: int) -> list[str]:
         """EVERY credited name, normalized -- the keys a book is capped under.
 
@@ -218,7 +246,9 @@ class Recommender:
         vs redundancy; ``cal_lambda`` sets how hard genres are matched (0 = off).
         """
         liked, disliked, interested = self._split(reactions)
-        cand = np.where(self._candidate_mask(reactions, filters))[0]
+        cand = self._candidates(
+            liked, disliked, interested, reactions, filters, want=REC_POOL_MULT * n
+        )
         if len(cand) == 0:
             return []
         scores = self._scores(liked, disliked, interested, cand)
@@ -246,7 +276,7 @@ class Recommender:
         """Cards for the swipe loop: exploit + explore + diversity."""
         rng = rng or random.Random()
         liked, disliked, interested = self._split(reactions)
-        cand = np.where(self._candidate_mask(reactions, filters))[0]
+        cand = self._candidates(liked, disliked, interested, reactions, filters, want=25 * n)
         if len(cand) == 0:
             return []
 
@@ -294,6 +324,9 @@ class Recommender:
         pos = liked + interested
         if not pos:
             return []
+        # Full scan on purpose: surprise gates on the whole-catalog score quantile and
+        # ranks by novelty, so a retrieved candidate subset would move the reference.
+        # It's the occasional "Surprise me" tab, not the hot swipe path (see §C notes).
         cand = np.where(self._candidate_mask(reactions, filters))[0]
         if len(cand) == 0:
             return []
@@ -460,15 +493,29 @@ class Recommender:
         if book_id not in self.cat.id_to_idx:
             return []
         i = self.cat.idx(book_id)
-        content = self.cat.emb @ self.cat.emb[i]
-        cf = np.asarray(self.cat.sim.getrow(i).todense()).ravel()
         w = float(self.cf_weight[i])
-        score = w * _standardize(cf) + (1.0 - w) * _standardize(content)
-        score[i] = -1e18  # never recommend the book itself
+        score = np.full(len(self.cat), -1e18, dtype=np.float64)
+        if self.cat.ann is None:  # exact: score the whole catalog (unchanged)
+            content = self.cat.emb @ self.cat.emb[i]
+            cf = np.asarray(self.cat.sim.getrow(i).todense()).ravel()
+            score = w * _standardize(cf) + (1.0 - w) * _standardize(content)
+            score[i] = -1e18  # never recommend the book itself
+            order = np.argsort(-score)
+        else:  # retrieve content-ANN + CF neighbours, score just those
+            content_cand = self.cat.ann.search(self.cat.emb[i], max(200, 20 * n))
+            cf_cand = np.unique(self.cat.sim.getrow(i).indices)
+            cand = np.unique(np.concatenate([content_cand, cf_cand]))
+            cand = cand[cand != i]
+            if len(cand) == 0:
+                return []
+            content = self.cat.emb[cand] @ self.cat.emb[i]
+            cf = np.asarray(self.cat.sim.getrow(i)[:, cand].todense()).ravel()
+            score[cand] = w * _standardize(cf) + (1.0 - w) * _standardize(content)
+            order = cand[np.argsort(-score[cand])]
         picks: list[int] = []
         author_count: dict[str, int] = {}
-        for j in np.argsort(-score):
-            j = int(j)
+        for jj in order:
+            j = int(jj)
             keys = self._author_keys(j)
             if self._cap_hit(keys, author_count, per_author):
                 continue

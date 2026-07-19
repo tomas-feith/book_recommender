@@ -19,8 +19,8 @@ constants and the "+35% EASE" win were all tuned at 10k and may not transfer.
 | 1 | Dense genre-mask matrix (`Catalog._genre_idx`) OOMs | ~150–300k books | Storage/memory (§A1) | Fatal, silent | ✅ Fixed (Phase 0) |
 | 2 | EASE-R retrain can't build (dense N×N inverse) | ~30–50k items | Algorithm/training (§B1) | Fatal | ✅ Fixed (Phase 0) |
 | 3 | Full-file rewrites on every book add + monolithic JSON at boot | ~100k books | Storage (§A2/§A3) | Fatal for the live-add path | ✅ Fixed (Phase 0) |
-| 4 | Linear title search (`SequenceMatcher` over all books) | ~100k books | Inference (§C) | Onboarding unusable | Phase 1 |
-| 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | Phase 1 |
+| 4 | Linear title search (`SequenceMatcher` over all books) | ~100k books | Inference (§C) | Onboarding unusable | ✅ Fixed (Phase 1, FTS) |
+| 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | ✅ Fixed (Phase 1, FAISS) |
 | 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | Phase 2 |
 | 7 | Dedup / language / selection hygiene | any large ingest | Data source (§F) | Quality | Phase 1 |
 
@@ -191,6 +191,21 @@ content retrieval quality (§C) and data hygiene (§F), not to squeezing CF.
 ---
 
 ## C. Serving / inference latency — no ANN
+
+> **✅ Fixed (Phase 1).** Two pieces:
+> - **Title search → trigram FTS** (`build_catalog_db` builds an FTS5 index; `TitleIndex`
+>   retrieves candidates then reranks with the exact fuzzy scorer). Validated: 100%
+>   top-1 agreement vs the old scan, 1191 ms → 33 ms at 22.6k (~flat at 1M).
+> - **Recommender → FAISS retrieve-then-rerank** (`app/ann.py`; content-ANN ∪ CF-neighbours
+>   candidate generation in `Recommender._candidates`, then the existing blend/MMR on the
+>   small set). Import-guarded with an exact fallback below `ANN_MIN` / without faiss, so
+>   small catalogs and the numpy-only path are unchanged. Validated on real profiles:
+>   recommend 95% / similar 98% / next_cards 81% agreement vs exact; FAISS retrieval
+>   34× faster than a full scan at 1M (3.3 ms vs 111 ms). **`surprise` stays a full scan**
+>   on purpose — it gates on the whole-catalog score/novelty distribution, which a
+>   retrieved subset would distort; it's the occasional tab, not the hot path.
+>
+> The original analysis follows.
 
 Every ranking path scans the full catalog:
 

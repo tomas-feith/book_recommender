@@ -119,7 +119,10 @@ class BookRecommenderService:
         if enc is None or not query.strip():
             return []
         qv = enc.encode([query], normalize_embeddings=True)[0].astype(np.float32)
-        order = np.argsort(-(self.catalog.emb @ qv))[:k]
+        if self.catalog.ann is not None:  # ANN retrieval at scale; exact scan otherwise
+            order = self.catalog.ann.search(qv, k)
+        else:
+            order = np.argsort(-(self.catalog.emb @ qv))[:k]
         return [self.catalog.books[int(i)] for i in order]
 
     def similar_books(self, book_id: str, n: int = 8) -> list[Scored]:

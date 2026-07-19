@@ -32,6 +32,8 @@ from scipy import sparse
 
 from eval.data import load_books
 
+from .ann import ANNIndex
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 
@@ -358,6 +360,9 @@ class Catalog:
     # of GB at 1M (G grows with the catalog). The index is O(total tags) instead
     # (~0.4 MB at 22k) and scatters into a mask in O(hits), not O(N)-per-genre.
     _genre_idx: dict[str, np.ndarray] = field(init=False, repr=False, default_factory=dict)
+    # Approximate-NN index over ``emb`` for content retrieval; None below ANN_MIN or
+    # if faiss is absent, in which case the recommender does the exact full scan.
+    ann: ANNIndex | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         if isinstance(self.books, BookTable):  # one columnar scan, no description blobs
@@ -376,6 +381,7 @@ class Catalog:
             for s in subs:
                 rows_by_genre.setdefault(s.lower(), []).append(i)
         self._genre_idx = {s: np.array(rows, dtype=np.int32) for s, rows in rows_by_genre.items()}
+        self.ann = ANNIndex.build(self.emb)
 
     @classmethod
     def load(cls, data_dir: Path = DATA, check_same_thread: bool = True) -> Catalog:
@@ -459,6 +465,8 @@ class Catalog:
             self._genre_idx[s.lower()] = (
                 np.append(prev, np.int32(i)) if prev is not None else np.array([i], dtype=np.int32)
             )
+        if self.ann is not None:  # keep ANN row-ids aligned with the catalog
+            self.ann.add(emb_vec)
         return i
 
     def filter_mask(

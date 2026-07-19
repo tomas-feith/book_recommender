@@ -39,8 +39,10 @@ be regenerated are committed (the demo fixtures and the Open Library seed lists)
 see [Building the data](#building-the-data) for the full pipeline, including the
 modern catalog and the co-read encoder.
 
-Serving needs only **numpy + scipy** (scipy loads the sparse matrix); torch is an
-*offline-only* dependency, used to build embeddings, not to serve.
+Serving needs only **numpy + scipy + faiss** (scipy loads the sparse matrix; faiss
+powers ANN retrieval at scale, and is import-guarded so its absence just falls back
+to an exact numpy scan); torch is an *offline-only* dependency, used to build
+embeddings, not to serve.
 
 ## The app
 
@@ -418,7 +420,7 @@ analysis; Dependabot keeps Python deps, Actions, and the Docker base image curre
 
 ### Container
 
-Serving needs only numpy + scipy + streamlit (torch is offline-only), so the
+Serving needs only numpy + scipy + streamlit + faiss (torch is offline-only), so the
 [`Dockerfile`](Dockerfile) is a single slim image with no ML runtime:
 
 ```bash
