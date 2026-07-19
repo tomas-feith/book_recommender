@@ -91,7 +91,7 @@ def _app_ratings(order: set) -> dict[str, dict[str, float]]:
     return by_user
 
 
-def rebuild_cf(data_dir: Path = DATA) -> None:
+def rebuild_cf(data_dir: Path = DATA, max_items: int = 30000) -> None:
     from cf_build import ease_cf
 
     from app.store import save_cf
@@ -112,7 +112,7 @@ def rebuild_cf(data_dir: Path = DATA) -> None:
     for uid, ratings in app.items():
         combined[f"app:{uid}"] = dict(ratings)
 
-    sim, pop = ease_cf(order, combined)
+    sim, pop = ease_cf(order, combined, max_items=max_items)
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
     n_app = sum(1 for k in combined if k.startswith("app:"))
     print(
@@ -133,6 +133,14 @@ def main() -> None:
     ap.add_argument(
         "--no-cf", action="store_true", help="Skip the CF rebuild (only ingest new books)."
     )
+    ap.add_argument(
+        "--max-items",
+        type=int,
+        default=30000,
+        help="Dense-EASE budget: solve item-item CF over the this-many most-rated books "
+        "(the rest fall to content). Bounds the O(H^3) inverse so the rebuild scales; "
+        "raise it for a bigger build box, lower it to speed the rebuild.",
+    )
     args = ap.parse_args()
 
     if args.add:
@@ -143,7 +151,7 @@ def main() -> None:
         print(f"  fetched {len(records)}; ingesting...")
         add_books(records)
     if not args.no_cf:
-        rebuild_cf()
+        rebuild_cf(max_items=args.max_items)
 
 
 if __name__ == "__main__":

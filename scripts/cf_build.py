@@ -63,6 +63,7 @@ def ease_cf(
     by_user: dict[str, dict[str, float]],
     lam: float = 1000.0,
     k: int = 50,
+    max_items: int = 30000,
 ) -> tuple[sparse.csr_matrix, np.ndarray]:
     """Return (sim, pop): EASE-R item-item weights truncated to top-k per row.
 
@@ -71,17 +72,48 @@ def ease_cf(
     the L2 regularizer (~1000 was optimal at 10k); ``k`` caps neighbors per item
     so the stored matrix stays sparse (~4 MB at k=50). Only books in ``order``
     count. Scored exactly like the KNN matrix: ``sim[cand][:, seed].sum(axis=1)``.
+
+    **Scale: solve over the warm head only.** EASE's closed form inverts an
+    item×item Gram -- O(H²) memory, O(H³) time -- so a dense N×N solve is impossible
+    past ~30-50k items (a 1M×1M Gram alone is 8 TB). But an item with no
+    interactions is *decoupled* in the Gram: its user column is empty, so its
+    off-diagonal Gram entries are zero and its EASE row/column come out all-zero
+    anyway. So we solve EASE only over the **warm** items (``pop > 0``), capped at
+    the ``max_items`` most-rated, and scatter that block back into the full N×N
+    matrix with cold items left empty. When ``warm <= max_items`` this is **exact**
+    -- bit-for-bit the same neighbors as solving the whole matrix -- while bounding
+    the dense inverse to H×H regardless of catalog size, which is what lets
+    refresh/rebuild run at 1M items. (When the warm set outgrows the dense budget,
+    the dropped tail loses CF and falls to content; that's the point to add
+    MF/iALS for the tail -- see docs/scaling-to-1m.md §B1.)
     """
     n = len(order)
     X, pop = _binary_user_item(order, by_user)
 
-    # Closed-form EASE: G = XᵀX (item Gram); B[i,j] = -P[i,j]/P[j,j], diag 0.
-    G = np.asarray((X.T @ X).todense(), dtype=np.float64)
-    G[np.diag_indices(n)] += lam
+    warm = np.where(pop > 0)[0]
+    if len(warm) == 0:
+        return sparse.csr_matrix((n, n), dtype=np.float32), pop
+    if len(warm) > max_items:  # keep the most-rated items (richest CF signal)
+        keep = np.argsort(-pop[warm], kind="stable")[:max_items]
+        warm = np.sort(warm[keep])
+    h = len(warm)
+
+    # Closed-form EASE on the warm sub-catalog: G = XᵀX (item Gram); B[i,j] = -P[i,j]/P[j,j].
+    Xw = X[:, warm]
+    G = np.asarray((Xw.T @ Xw).todense(), dtype=np.float64)
+    G[np.diag_indices(h)] += lam
     P = np.linalg.inv(G)
     B = -P / np.diag(P)
     np.fill_diagonal(B, 0.0)
-    return _topk_rows(B, k), pop
+    block = _topk_rows(B, k).tocoo()  # (h, h) top-k per warm row
+
+    # Scatter the warm block back to full catalog coordinates; cold items stay empty.
+    sim = sparse.csr_matrix(
+        (block.data, (warm[block.row], warm[block.col])),
+        shape=(n, n),
+        dtype=np.float32,
+    )
+    return sim, pop
 
 
 def sparse_topk_cf(
