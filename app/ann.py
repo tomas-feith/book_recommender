@@ -54,7 +54,9 @@ class ANNIndex:
         d = int(emb.shape[1])
         nlist = int(min(4096, max(64, 4 * np.sqrt(n))))  # ~4*sqrt(N) cells
         quant = faiss.IndexFlatIP(d)
-        index = faiss.IndexIVFPQ(quant, d, nlist, _pq_subquantizers(d), 8, faiss.METRIC_INNER_PRODUCT)
+        index = faiss.IndexIVFPQ(
+            quant, d, nlist, _pq_subquantizers(d), 8, faiss.METRIC_INNER_PRODUCT
+        )
         x = np.ascontiguousarray(emb, dtype=np.float32)
         index.train(x)
         index.add(x)
