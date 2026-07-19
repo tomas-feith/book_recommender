@@ -425,6 +425,10 @@ with SQL (pgvector `<=>` for content, a stored item-item table for CF) and keep
 the `filter_mask` conditions as `WHERE` clauses. `SwipeStore` is already
 database-shaped. Nothing in `recommender.py` / `service.py` moves.
 
+For the **1M-book** target specifically — what breaks at that scale and the fix
+for each (the dense genre-mask OOM, the dense-EASE retrain wall, no-ANN full scans,
+and the data-hygiene issues) — see [docs/scaling-to-1m.md](docs/scaling-to-1m.md).
+
 ## What this deliberately is *not* (yet)
 
 - **Multi-taste profiles.** A single centroid can't perfectly represent someone
