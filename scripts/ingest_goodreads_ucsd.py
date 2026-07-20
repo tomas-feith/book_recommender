@@ -39,11 +39,13 @@ import gzip
 import heapq
 import json
 import sys
+from array import array
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import numpy as np
+from scipy import sparse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -58,6 +60,8 @@ LANG_MAP = {"eng": "en", "en-US": "en", "en-GB": "en", "en-CA": "en", "": "en"}
 # Swipe/rating scale is 1-5; UCSD ratings are already 0-5 (0 == no rating).
 MIN_RATED_PER_USER = 3  # users with too little signal add noise to CF
 MAX_USERS = 200_000  # cap CF training users to bound memory
+MAX_INTERACTIONS = 120_000_000  # ~1 GB of int32 CSR coordinates; the real RAM ceiling
+EMB_CHUNK = 20_000  # books encoded (and written) per chunk, so texts never all resident
 
 
 def stream_jsonl_gz(path: Path) -> Iterable[dict]:
@@ -103,19 +107,36 @@ def _to_int(x, default=0) -> int:
         return default
 
 
-def select_top_books(books_path: Path, top_n: int) -> list[dict]:
-    """Stream the books file, keep the ``top_n`` with the most ratings (min-heap)."""
-    heap: list[tuple] = []  # (ratings_count, book_id, raw)
+def select_top_book_ids(books_path: Path, top_n: int) -> set[str]:
+    """Stream the books file, return the ids of the ``top_n`` most-rated books.
+
+    **Ids only, deliberately.** Holding the raw records in the heap costs several KB
+    each (Goodreads ships ``popular_shelves`` with ~100 entries per book), so at
+    ``top_n`` = 1M that heap alone is multiple GB. Ids are ~100 bytes; the caller
+    re-streams the file and converts only the winners to slim records.
+    """
+    heap: list[tuple[int, str]] = []  # min-heap on ratings_count
     for i, raw in enumerate(stream_jsonl_gz(books_path)):
-        rc = _to_int(raw.get("ratings_count"))
         if not raw.get("title"):
             continue
-        key = (rc, str(raw.get("book_id", i)))
+        rc = _to_int(raw.get("ratings_count"))
+        bid = str(raw.get("book_id", i))
         if len(heap) < top_n:
-            heapq.heappush(heap, (rc, key[1], raw))
+            heapq.heappush(heap, (rc, bid))
         elif rc > heap[0][0]:
-            heapq.heapreplace(heap, (rc, key[1], raw))
-    return [raw for _, _, raw in sorted(heap, key=lambda t: -t[0])]
+            heapq.heapreplace(heap, (rc, bid))
+    return {bid for _, bid in heap}
+
+
+def iter_records(
+    books_path: Path, keep_ids: set[str], authors: dict[str, str], genres: dict[str, list[str]]
+):
+    """Second pass: yield slim catalog records for the selected books, in file order."""
+    for i, raw in enumerate(stream_jsonl_gz(books_path)):
+        if not raw.get("title"):
+            continue
+        if str(raw.get("book_id", i)) in keep_ids:
+            yield to_record(raw, authors, genres)
 
 
 def to_record(raw: dict, authors: dict[str, str], genres: dict[str, list[str]]) -> dict:
@@ -147,6 +168,10 @@ def build_interactions(path: Path, keep: set) -> dict[str, dict[str, float]]:
 
     Returns {user_id: {gr_book_id: rating}}. Users with < MIN_RATED_PER_USER
     ratings are dropped; the set is capped at MAX_USERS.
+
+    Only viable for small catalogs -- a Python dict-of-dicts costs ~150 bytes per
+    interaction, so the full Goodreads file (hundreds of millions of rated
+    interactions) needs :func:`build_user_item` instead.
     """
     by_user: dict[str, dict[str, float]] = defaultdict(dict)
     for row in stream_jsonl_gz(path):
@@ -162,53 +187,168 @@ def build_interactions(path: Path, keep: set) -> dict[str, dict[str, float]]:
     return filtered
 
 
+def count_ratings_per_user(path: Path, keep: set[str]) -> dict[str, int]:
+    """Pass 1 over interactions: how many kept books each user rated.
+
+    Bounded by the number of *users*, not interactions -- the one aggregate we can
+    afford to hold before we know which users are worth keeping.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for row in stream_jsonl_gz(path):
+        if _to_int(row.get("rating")) >= 1 and ("gr:" + str(row.get("book_id"))) in keep:
+            counts[str(row["user_id"])] += 1
+    return counts
+
+
+def choose_users(
+    counts: dict[str, int], max_users: int = MAX_USERS, max_interactions: int = MAX_INTERACTIONS
+) -> dict[str, int]:
+    """Pick the CF training users -> {user_id: row}, under both caps.
+
+    Most-active users first (densest Gram per row kept), dropping anyone below
+    ``MIN_RATED_PER_USER``, and stopping once the interaction budget is spent so the
+    CSR stays within RAM. Ties break on user id so the build is reproducible.
+    """
+    eligible = sorted(
+        ((u, c) for u, c in counts.items() if c >= MIN_RATED_PER_USER),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    chosen: dict[str, int] = {}
+    total = 0
+    for u, c in eligible:
+        if len(chosen) >= max_users or total + c > max_interactions:
+            break
+        chosen[u] = len(chosen)
+        total += c
+    return chosen
+
+
+def build_user_item(
+    path: Path, col_of: dict[str, int], user_row: dict[str, int], n_items: int
+) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """Pass 2: stream interactions straight into a binary users×items CSR.
+
+    Rows/cols accumulate in ``array('i')`` (4 raw bytes each, no Python int objects),
+    which is what keeps a 100M-interaction build inside a few hundred MB instead of
+    the tens of GB the dict-of-dicts form would need.
+    """
+    rows, cols = array("i"), array("i")
+    for row in stream_jsonl_gz(path):
+        if _to_int(row.get("rating")) < 1:
+            continue
+        ui = user_row.get(str(row["user_id"]))
+        if ui is None:
+            continue
+        j = col_of.get("gr:" + str(row.get("book_id")))
+        if j is not None:
+            rows.append(ui)
+            cols.append(j)
+    r = np.frombuffer(rows, dtype=np.int32)
+    c = np.frombuffer(cols, dtype=np.int32)
+    X = sparse.csr_matrix(
+        (np.ones(len(r), dtype=np.float32), (r, c)),
+        shape=(max(len(user_row), 1), n_items),
+        dtype=np.float32,
+    )
+    X.sum_duplicates()
+    X.data[:] = 1.0  # binarize: EASE uses implicit co-occurrence, not rating value
+    pop = np.asarray(X.sum(axis=0)).ravel().astype(np.float32)
+    return X, pop
+
+
 # ---- driver ------------------------------------------------------------------
 
 
+def write_books_and_embed(
+    out_path: Path, records: Iterator[dict], encoder, chunk: int = EMB_CHUNK
+) -> tuple[list[str], np.ndarray]:
+    """Stream records to ``real_books.json`` while encoding them chunk by chunk.
+
+    Two things that are fine at 25k and fatal at 1M happen here. ``json.dumps(books)``
+    builds the whole serialized document as one string before writing (GBs), and
+    ``encode([...all texts...])`` holds every text plus the fp32 result. So we write
+    the JSON array incrementally and encode ``chunk`` books at a time into a single
+    preallocated fp16 array. Returns (ids in file order, embeddings).
+    """
+    ids: list[str] = []
+    blocks: list[np.ndarray] = []
+    n_desc = 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as fh:
+        fh.write("[\n")
+        first = True
+        pending: list[dict] = []
+        for rec in records:
+            n_desc += 1 if rec["description"] else 0
+            pending.append(rec)
+            if len(pending) >= chunk:
+                first = _emit(fh, pending, ids, blocks, encoder, first)
+                pending = []
+        if pending:
+            first = _emit(fh, pending, ids, blocks, encoder, first)
+        fh.write("\n]\n")
+    print(f"  {len(ids)} books written ({n_desc} with descriptions)")
+    emb = np.vstack(blocks) if blocks else np.zeros((0, 384), dtype=np.float16)
+    return ids, emb
+
+
+def _emit(fh, recs: list[dict], ids: list[str], blocks: list, encoder, first: bool) -> bool:
+    """Encode one chunk and append it to the open JSON array."""
+    blocks.append(np.asarray(encoder.encode([book_to_text(b) for b in recs]), dtype=np.float16))
+    for b in recs:
+        fh.write(("" if first else ",\n") + "  " + json.dumps(b, ensure_ascii=False))
+        first = False
+        ids.append(b["id"])
+    print(f"    {len(ids)} encoded", flush=True)
+    return first
+
+
 def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data_dir=DATA):
-    from cf_build import sparse_topk_cf
+    from cf_build import ease_from_X
 
     from app.store import save_cf
     from eval.embedders import SentenceTransformerEmbedder
 
-    print(f"Selecting top {top_n} books by rating count...")
-    raw_books = select_top_books(books_path, top_n)
-    keep_raw = {str(r["book_id"]) for r in raw_books}
+    print(f"Pass 1/2 over books: selecting top {top_n} by rating count...")
+    keep_raw = select_top_book_ids(books_path, top_n)
+    print(f"  {len(keep_raw)} selected")
     authors = load_authors(authors_path)
     genres = load_genres(genres_path, keep=keep_raw)
-    books = [to_record(r, authors, genres) for r in raw_books]
-    order = [b["id"] for b in books]
-    keep = set(order)
-    print(
-        f"  selected {len(books)} books "
-        f"({sum(1 for b in books if b['description'])} with descriptions)"
-    )
-
-    print("Streaming interactions (the big one)...")
-    by_user = build_interactions(interactions_path, keep)
-    print(f"  {len(by_user)} users after filtering")
 
     model = "BAAI/bge-small-en-v1.5"
-    print(f"Embedding {len(books)} books with {model}...")
-    emb = SentenceTransformerEmbedder(model).encode([book_to_text(b) for b in books])
-
-    print("Building sparse top-k CF...")
-    sim, pop = sparse_topk_cf(order, by_user)
-
-    data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "real_books.json").write_text(
-        json.dumps(books, indent=2, ensure_ascii=False), encoding="utf-8"
+    print(f"Pass 2/2 over books: writing records + embedding with {model}...")
+    order, emb = write_books_and_embed(
+        data_dir / "real_books.json",
+        iter_records(books_path, keep_raw, authors, genres),
+        SentenceTransformerEmbedder(model),
     )
+    del authors, genres, keep_raw
+    col_of = {bid: i for i, bid in enumerate(order)}
+    keep = set(order)
+
+    print("Pass 1/2 over interactions: counting per user...")
+    counts = count_ratings_per_user(interactions_path, keep)
+    user_row = choose_users(counts)
+    print(f"  {len(counts)} users seen -> {len(user_row)} kept")
+    del counts
+
+    print("Pass 2/2 over interactions: building the user-item matrix...")
+    X, pop = build_user_item(interactions_path, col_of, user_row, len(order))
+    print(f"  X = {X.shape[0]}x{X.shape[1]}, {X.nnz} interactions")
+
+    print("Solving EASE over the warm head...")
+    sim, pop = ease_from_X(X, pop)
+
     np.savez_compressed(
         data_dir / "real_embeddings.npz",
         ids=np.array(order, dtype=str),
-        emb=emb.astype(np.float32),
+        emb=emb,
         model=np.array(model),
     )
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
     print(
-        f"Done. Wrote {len(books)} books, sparse CF ({sim.shape[0]}x{sim.shape[1]}, "
-        f"{sim.nnz} nnz) from {len(by_user)} users -> {data_dir}"
+        f"Done. Wrote {len(order)} books, sparse CF ({sim.shape[0]}x{sim.shape[1]}, "
+        f"{sim.nnz} nnz) from {len(user_row)} users -> {data_dir}"
     )
 
 

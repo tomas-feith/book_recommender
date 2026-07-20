@@ -87,9 +87,24 @@ def ease_cf(
     the dropped tail loses CF and falls to content; that's the point to add
     MF/iALS for the tail -- see docs/scaling-to-1m.md §B1.)
     """
-    n = len(order)
     X, pop = _binary_user_item(order, by_user)
+    return ease_from_X(X, pop, lam=lam, k=k, max_items=max_items)
 
+
+def ease_from_X(
+    X: sparse.csr_matrix,
+    pop: np.ndarray,
+    lam: float = 1000.0,
+    k: int = 50,
+    max_items: int = 30000,
+) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """EASE-R over a prebuilt binary users×items matrix -- see :func:`ease_cf`.
+
+    Split out so large ingests can stream ``X`` straight into numpy/CSR instead of
+    materializing a ``{user: {book: rating}}`` dict first. At 100M+ interactions that
+    dict is hundreds of GB of Python objects; the CSR is ~8 bytes per interaction.
+    """
+    n = X.shape[1]
     warm = np.where(pop > 0)[0]
     if len(warm) == 0:
         return sparse.csr_matrix((n, n), dtype=np.float32), pop
