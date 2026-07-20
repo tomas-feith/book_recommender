@@ -128,10 +128,20 @@ class Scored:
 class Recommender:
     def __init__(self, catalog: Catalog):
         self.cat = catalog
-        # Per-book trust in CF, from rating count (log-scaled, capped at 1).
-        self.cf_weight = np.clip(np.log1p(catalog.pop) / np.log1p(POP_REF), 0.0, 1.0).astype(
-            np.float32
-        )
+        # Per-book trust in CF, from rating count (log-scaled, capped at 1)...
+        w = np.clip(np.log1p(catalog.pop) / np.log1p(POP_REF), 0.0, 1.0)
+        # ...but zeroed wherever the book has no CF row at all. Popularity and CF
+        # coverage come apart once the catalog outgrows the EASE budget: EASE solves
+        # over the ``max_items`` most-rated books, so at 250k every book is
+        # popularity-warm (rank 250,000 still has 201 ratings) while ~230k of them
+        # have a structurally empty ``sim`` row. Those would score
+        # ``cf_weight ~ 0.85`` against a CF sum of exactly 0, which
+        # ``_standardize_sparse`` maps to ~ -2.1 -- penalizing the entire mid-tail
+        # ~1.8 z-units *below books with no ratings at all*, on a content channel
+        # spanning only about +/-4.5. cf_weight has to mean "we have CF evidence for
+        # this book", not "this book is popular".
+        has_cf = np.diff(catalog.sim.indptr) > 0
+        self.cf_weight = np.where(has_cf, w, 0.0).astype(np.float32)
 
     # ---- core scoring -------------------------------------------------------
 
