@@ -44,6 +44,14 @@ REC_POOL_MULT = 20  # "For You": diversify within the top REC_POOL_MULT*n candid
 _SUFFIXES = frozenset({"jr.", "jr", "sr.", "sr", "ii", "iii", "iv", "ph.d.", "phd", "m.d.", "md"})
 CAL_LAMBDA = 0.4  # "For You": genre-calibration strength (0 = off); see finetune notes
 CAL_SMOOTH = 0.01  # KL smoothing so an absent list-genre doesn't blow up
+# "For You": books outside the top HEAD_FRAC by popularity are the *tail*, and
+# TAIL_SLOTS_FRAC of the list is reserved for them. Measured at 100k, head and tail
+# compete for the same ten slots: swapping in a stronger head model (EASE over iALS)
+# lifted head Recall 0.169 -> 0.237 and pushed tail Recall 0.104 -> 0.050 with no change
+# to the tail model at all. So tail exposure cannot be bought by better tail ranking
+# alone -- it has to be allocated. 2 of 10 slots by default.
+HEAD_FRAC = 0.1
+TAIL_SLOTS_FRAC = 0.2
 
 
 def _standardize(x: np.ndarray) -> np.ndarray:
@@ -142,6 +150,11 @@ class Recommender:
         # this book", not "this book is popular".
         has_cf = np.diff(catalog.sim.indptr) > 0
         self.cf_weight = np.where(has_cf, w, 0.0).astype(np.float32)
+        # Popularity rank, for the reserved tail slots. Rank rather than a pop threshold
+        # so the split means the same thing at 22k and at 1M.
+        n_head = max(1, int(len(catalog.pop) * HEAD_FRAC))
+        self.is_tail = np.ones(len(catalog.pop), dtype=bool)
+        self.is_tail[np.argsort(-catalog.pop, kind="stable")[:n_head]] = False
 
     # ---- core scoring -------------------------------------------------------
 
@@ -293,6 +306,7 @@ class Recommender:
         per_author: int = 2,
         mmr_lambda: float = MMR_LAMBDA,
         cal_lambda: float = CAL_LAMBDA,
+        tail_frac: float = TAIL_SLOTS_FRAC,
     ) -> list[Scored]:
         """Best-guess recommendations for a 'For You' list.
 
@@ -302,6 +316,13 @@ class Recommender:
         sci-fi and your romance in proportion, not all of the majority genre),
         capped at ``per_author`` books per author. ``mmr_lambda`` trades relevance
         vs redundancy; ``cal_lambda`` sets how hard genres are matched (0 = off).
+
+        ``tail_frac`` of the list is then **reserved** for books outside the popular
+        head, filled by the same MMR from tail candidates only. This is a slot
+        allocation rather than a scoring change, because scoring cannot fix it: the
+        head and tail compete for the same ``n`` places, so at 100k a stronger head
+        model raised head Recall and *halved* tail Recall without the tail model
+        changing at all. Set ``tail_frac=0`` to rank purely by score.
         """
         liked, disliked, interested = self._split(reactions)
         cand = self._candidates(
@@ -311,17 +332,35 @@ class Recommender:
             return []
         scores = self._scores(liked, disliked, interested, cand)
         order = cand[np.argsort(-scores)]
-        pool = order[: max(REC_POOL_MULT * n, n)]
+
+        n_tail = min(round(n * tail_frac), n)
+        author_count: dict[str, int] = {}
         picks = self._mmr(
-            pool,
+            order[: max(REC_POOL_MULT * n, n)],
             liked,
             disliked,
             interested,
-            n,
+            n - n_tail,
             lam=mmr_lambda,
             per_author=per_author,
             cal_lambda=cal_lambda,
+            author_count=author_count,
         )
+        if n_tail:
+            taken = set(picks)
+            tail_order = order[self.is_tail[order]]
+            tail_pool = [int(i) for i in tail_order[: REC_POOL_MULT * n] if int(i) not in taken]
+            picks += self._mmr(
+                tail_pool,
+                liked,
+                disliked,
+                interested,
+                n_tail,
+                lam=mmr_lambda,
+                per_author=per_author,
+                cal_lambda=cal_lambda,
+                author_count=author_count,
+            )
         return self._as_scored(picks, liked, disliked, interested)
 
     def next_cards(
@@ -446,6 +485,7 @@ class Recommender:
         lam: float = MMR_LAMBDA,
         per_author: int = 1,
         cal_lambda: float = 0.0,
+        author_count: dict[str, int] | None = None,
     ) -> list[int]:
         """Greedy list selection: relevance − redundancy (MMR) − genre miscalibration.
 
@@ -460,13 +500,25 @@ class Recommender:
         pool = list(pool)
         if not pool:
             return []
+        # Recomputed on the pool rather than sliced from the caller's scores on purpose:
+        # _scores standardizes over whatever set it is given, so scores are SET-RELATIVE.
+        # Reusing the candidate-set values here silently changes the relevance/redundancy
+        # balance and the resulting list.
         rel_scores = self._scores(liked, disliked, interested, np.array(pool))
         rel = {p: float(rel_scores[i]) for i, p in enumerate(pool)}
         target = self._genre_target(liked, interested) if cal_lambda > 0 else {}
+        # Per-book metadata is loop-invariant: author keys and genre mass depend only on
+        # the book, but the greedy re-examines every remaining candidate on every one of
+        # k passes, so computing them inline meant ~k times more string splits and dict
+        # builds than there are books. Hoist them out.
+        keys_of = {p: self._author_keys(p) for p in pool}
+        mass_of = {p: self._book_genre_mass(p) for p in pool} if cal_lambda > 0 else {}
         sel_mass: dict[str, float] = {}  # running (unnormalized) genre mass of `selected`
         sel_total = 0.0
         selected: list[int] = []
-        author_count: dict[str, int] = {}
+        # Caller may pass a running tally so a second pass (the reserved tail slots)
+        # keeps honouring the per-author cap set by the first.
+        author_count = {} if author_count is None else author_count
         while pool and len(selected) < k:
             # Redundancy for ALL remaining candidates in one matmul (candidates x picked).
             rel_v = np.fromiter((rel[p] for p in pool), dtype=np.float64, count=len(pool))
@@ -477,11 +529,11 @@ class Recommender:
             base = lam * rel_v - (1 - lam) * div_v
             best_idx, best_val = -1, -1e18
             for idx, p in enumerate(pool):
-                if self._cap_hit(self._author_keys(p), author_count, per_author):
+                if self._cap_hit(keys_of[p], author_count, per_author):
                     continue
                 val = float(base[idx])
                 if target:  # genre-calibration penalty for the list-with-p (cheap, per-item)
-                    pm = self._book_genre_mass(p)
+                    pm = mass_of[p]
                     tot = sel_total + sum(pm.values())
                     if tot > 0:
                         q = {
@@ -495,8 +547,8 @@ class Recommender:
                 best_idx = int(np.argmax(rel_v))
             best = pool[best_idx]
             selected.append(best)
-            self._count_author(self._author_keys(best), author_count)
-            for g, m in self._book_genre_mass(best).items():  # fold into running mass
+            self._count_author(keys_of[best], author_count)
+            for g, m in mass_of.get(best, {}).items():  # fold into running mass
                 sel_mass[g] = sel_mass.get(g, 0.0) + m
                 sel_total += m
             pool.pop(best_idx)

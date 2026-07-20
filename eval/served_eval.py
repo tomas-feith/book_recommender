@@ -31,7 +31,7 @@ from scipy import sparse
 
 import app.ann as annmod
 from app.ann import ANNIndex
-from app.recommender import REC_POOL_MULT, Recommender
+from app.recommender import REC_POOL_MULT, TAIL_SLOTS_FRAC, Recommender
 from app.store import Catalog
 
 from .data import load_profiles
@@ -67,6 +67,21 @@ def ranked_order(rec: Recommender, seed_likes: list[int], dislikes: list[int], k
     return cand[np.argsort(-scores)]
 
 
+def assembled_order(
+    rec: Recommender, seed_likes: list[int], dislikes: list[int], n: int, tail_frac: float
+):
+    """The list a user actually sees: retrieve, score, then MMR + calibration + slots.
+
+    ``ranked_order`` stops at the ranking, which is the right unit for scoring changes
+    but invisible to anything in list *assembly* -- author caps, genre calibration, and
+    the reserved tail slots all live here. Measuring those needs the real path.
+    """
+    reactions = {rec.cat.books[i]["id"]: "like" for i in seed_likes}
+    reactions.update({rec.cat.books[i]["id"]: "dislike" for i in dislikes})
+    picks = rec.recommend(reactions, {}, n=n, tail_frac=tail_frac)
+    return np.array([rec.cat.idx(s.book["id"]) for s in picks], dtype=np.int64)
+
+
 def evaluate(
     cat: Catalog,
     profiles: list[dict],
@@ -74,6 +89,8 @@ def evaluate(
     k_holdout: int,
     k_eval: int,
     seeds: list[int],
+    assemble: bool = False,
+    tail_frac: float = TAIL_SLOTS_FRAC,
 ) -> dict[str, float]:
     rec = Recommender(cat)  # recomputes cf_weight from the (blinded) pop
     warm_r: list[float] = []
@@ -91,7 +108,10 @@ def evaluate(
             held = set(rng.sample(likes, k_holdout))
             seed_likes = [i for i in likes if i not in held]
             t = time.perf_counter()
-            order = ranked_order(rec, seed_likes, dislikes, REC_POOL_MULT * k_eval)
+            if assemble:
+                order = assembled_order(rec, seed_likes, dislikes, k_eval, tail_frac)
+            else:
+                order = ranked_order(rec, seed_likes, dislikes, REC_POOL_MULT * k_eval)
             t_total += time.perf_counter() - t
             n_calls += 1
             top = order[:k_eval].tolist()
@@ -144,6 +164,20 @@ def main() -> None:
         "at --head-size -- a FIXED population, so two CF builders with different "
         "coverage stay comparable ('natural' degenerates under a builder that covers "
         "everything).",
+    )
+    ap.add_argument(
+        "--assemble",
+        action="store_true",
+        help="Evaluate the assembled list from recommend() -- MMR, genre calibration and "
+        "the reserved tail slots -- instead of the raw ranking. Slower, but it is what a "
+        "user actually sees.",
+    )
+    ap.add_argument(
+        "--tail-frac",
+        type=float,
+        default=TAIL_SLOTS_FRAC,
+        help="share of the assembled list reserved for books outside the popular head "
+        "(0 = rank purely by score). Only meaningful with --assemble.",
     )
     ap.add_argument(
         "--head-size",
@@ -200,12 +234,12 @@ def main() -> None:
     seeds = list(range(args.seeds))
 
     cat.ann = None  # exact full scan
-    m = evaluate(cat, profiles, cold, args.k_holdout, args.k, seeds)
+    m = evaluate(cat, profiles, cold, args.k_holdout, args.k, seeds, args.assemble, args.tail_frac)
     _row("exact", m)
 
     annmod.ANN_MIN = 0  # force FAISS on at this (sub-threshold) scale to compare
     cat.ann = ANNIndex.build(np.ascontiguousarray(cat.emb, dtype=np.float32))
-    m = evaluate(cat, profiles, cold, args.k_holdout, args.k, seeds)
+    m = evaluate(cat, profiles, cold, args.k_holdout, args.k, seeds, args.assemble, args.tail_frac)
     _row("faiss-ann", m)
     print()
 
