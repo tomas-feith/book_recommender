@@ -4,10 +4,13 @@ Design follows directly from the offline eval findings:
 
 * Rocchio taste profile from liked (minus disliked) book embeddings.
 * Content score (embedding cosine) AND collaborative score (item-item CF).
-* **Per-item adaptive blend**: each candidate's weight on CF scales with how many
-  ratings it has. A brand-new / obscure book (few ratings) is ranked by content;
-  a well-rated book is ranked by CF. This is the direct answer to the cold-start
-  result, where a static 50/50 blend was wrong in both regimes.
+* **Per-item adaptive blend**: ``content + cf_weight * cf``, where each candidate's
+  weight on CF scales with how many ratings it has. Content is the baseline every
+  book is judged on; CF is *evidence on top* for books that have readers. A
+  brand-new / obscure book is therefore ranked on content alone rather than being
+  compared against a quantity it cannot have. This is the direct answer to the
+  cold-start result, where a static 50/50 blend was wrong in both regimes -- and to
+  the later finding that a *convex* blend silently made cold books unreachable.
 * Hard metadata filters (language / genre / year) applied AROUND the vector
   search, never inside the embedding.
 * Card selection for the swipe loop mixes exploit / explore / diversity so the
@@ -46,6 +49,35 @@ CAL_SMOOTH = 0.01  # KL smoothing so an absent list-genre doesn't blow up
 def _standardize(x: np.ndarray) -> np.ndarray:
     std = x.std()
     return (x - x.mean()) / std if std > 1e-9 else x - x.mean()
+
+
+def _standardize_sparse(x: np.ndarray) -> np.ndarray:
+    """Standardize a sparse channel using the spread of its NON-ZERO entries.
+
+    Z-scoring both channels was silently broken for cold-start. The CF channel is a sum
+    over a top-k sparse matrix, so ~96% of candidates score exactly 0; that zero mass
+    collapses the standard deviation, and the few non-zero entries come out around +57
+    sigma while the dense content cosine tops out near +4.5. The blend then added two
+    quantities ~13x apart in scale, so *any* CF connection beat *every* pure-content
+    book: the measured cold share of the top-10 was 0.0% against a 40% base rate, i.e.
+    cold books were structurally unreachable no matter how well they matched.
+
+    Taking mean/std over the entries that actually carry signal fixes the scale while
+    keeping CF *magnitude*, which is the part that matters -- EASE weights are
+    meaningful, and rank-normalizing (which does fix the scale) flattens "co-read 50x"
+    against "co-read once" and cost 32% of warm Recall to buy the same cold gain.
+
+    A second property matters for the additive blend in ``_scores``: a candidate with
+    *no* CF evidence maps to ``(0 - mu)/std``, i.e. a negative value. So a warm book
+    that nothing co-read is pushed **below** a cold book with equal content fit, which
+    is the correct ordering -- absence of evidence for a book that has readers is
+    informative, absence for a book that has none is not.
+    """
+    nz = x[x != 0]
+    if nz.size < 2:
+        return _standardize(x)
+    mu, std = nz.mean(), nz.std()
+    return (x - mu) / std if std > 1e-9 else x - mu
 
 
 def genre_distribution(
@@ -124,6 +156,22 @@ class Recommender:
     def _scores(self, liked, disliked, interested, cand: np.ndarray) -> np.ndarray:
         """Adaptive-hybrid score for each candidate index in ``cand``.
 
+        The blend is **additive**: ``content + cf_weight * cf``, not the convex
+        ``w*cf + (1-w)*content`` it used to be. Under the convex form a warm book was
+        scored on CF and a cold book on content -- two different quantities compared
+        directly, with nothing calibrating them -- and cold books lost every time
+        (measured: 0.0% of the top-10 against a 40% base rate). Additively, every book
+        shares the content baseline and CF is *evidence on top*, so the comparison is
+        always content-vs-content plus a bounded, signed bonus.
+
+        Swept against the served harness on the real catalog at cold fractions
+        0.40/0.70/0.90/0.95 (a 250k catalog is ~92% CF-cold, 1M ~98%, so the current
+        40% is the wrong point to tune at). Additive+sparse-standardized wins the
+        aggregate at *every* fraction -- 0.222/0.136/0.118/0.124 vs the old
+        0.206/0.096/0.106/0.118 -- and at f=0.40 it improves warm Recall@10 too
+        (0.360 vs 0.348) rather than trading it away. Rank-normalizing both channels
+        also fixes the scale but flattens CF magnitude and loses 32% of warm Recall.
+
         Note: a *single* Rocchio centroid is used deliberately. Per-cluster
         multi-taste profiles were built and evaluated on the real profiles
         (held-out Recall@10) and consistently underperformed the pooled mean --
@@ -143,7 +191,7 @@ class Recommender:
             cf = cf - BETA * self._cf_sum(cand, disliked)
 
         w = self.cf_weight[cand]
-        return w * _standardize(cf) + (1.0 - w) * _standardize(content)
+        return _standardize(content) + w * _standardize_sparse(cf)
 
     def _cf_sum(self, cand: np.ndarray, idxs) -> np.ndarray:
         """Summed CF similarity from each candidate to the books in ``idxs``.
@@ -498,7 +546,7 @@ class Recommender:
         if self.cat.ann is None:  # exact: score the whole catalog (unchanged)
             content = self.cat.emb @ self.cat.emb[i]
             cf = np.asarray(self.cat.sim.getrow(i).todense()).ravel()
-            score = w * _standardize(cf) + (1.0 - w) * _standardize(content)
+            score = _standardize(content) + w * _standardize_sparse(cf)
             score[i] = -1e18  # never recommend the book itself
             order = np.argsort(-score)
         else:  # retrieve content-ANN + CF neighbours, score just those
@@ -510,7 +558,7 @@ class Recommender:
                 return []
             content = self.cat.emb[cand] @ self.cat.emb[i]
             cf = np.asarray(self.cat.sim.getrow(i)[:, cand].todense()).ravel()
-            score[cand] = w * _standardize(cf) + (1.0 - w) * _standardize(content)
+            score[cand] = _standardize(content) + w * _standardize_sparse(cf)
             order = cand[np.argsort(-score[cand])]
         picks: list[int] = []
         author_count: dict[str, int] = {}
