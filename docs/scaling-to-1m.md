@@ -23,6 +23,8 @@ constants and the "+35% EASE" win were all tuned at 10k and may not transfer.
 | 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | ✅ Fixed (Phase 1, FAISS) |
 | 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | 🚧 Phase 2 started (`eval/served_eval`) |
 | 7 | Dedup / language / selection hygiene | any large ingest | Data source (§F) | Quality | ✅ Fixed (dedup/lang/selection); subjects/coverage remain |
+| 8 | Ingest adapter holds raw records + interactions in RAM | ~100k books / ~50M interactions | Data source (§G1) | Fatal (OOM at ingest) | ✅ Fixed (streamed) |
+| 9 | Encoding throughput — 4.4 books/s on this CPU | any large ingest | Ingest compute (§G2) | ~63 h for 1M locally | ⚠️ Hardware; checkpointed, GPU for 1M |
 
 > **Latent break resolved.** `scripts/refresh.py` (the operational CF retrain) called
 > `ease_cf`, which capped out around 30–50k items (§B1) — a live risk on the *current*
@@ -342,6 +344,66 @@ re-measured.
 
 *(One thing that holds up: `sim_indices` as int32 is fine — 50M nnz at k=50 is well
 under the 2.1B limit. No overflow risk there.)*
+
+---
+
+## G. The ingest itself — where the data actually comes from
+
+**Source decision: UCSD Goodreads** (`scripts/ingest_goodreads_ucsd.py`).
+It is the only candidate that supplies breadth *and* interactions — ~2.3M books with
+rated interactions. Open Library has ~30M works but **no interactions**, so a catalog
+built from it alone is 100% CF-cold, which §E just measured as Recall@10 ≈ 0 on cold
+targets. Use OL to widen *after* a ratings-bearing spine exists.
+
+Files (verified live at `mcauleylab.ucsd.edu/public_datasets/gdrive/goodreads/`,
+cached under the gitignored `.cache/goodreads/`):
+
+| file | size | role |
+|---|---|---|
+| `goodreads_books.json.gz` | 1.94 GB | metadata; heap-select top-N by `ratings_count` |
+| `goodreads_interactions_dedup.json.gz` | 10.7 GB | the CF signal |
+| `goodreads_book_genres_initial.json.gz` | 0.02 GB | better genres than `popular_shelves` |
+| `goodreads_book_authors.json.gz` | 0.02 GB | author names (829,529) |
+
+### G1. The adapter was written for 25k and had three linear-in-N blowups
+
+> **✅ Fixed.** All three, validated on the real dump and the real goodbooks ratings.
+
+The selection heap held **whole raw records** (Goodreads ships ~100 `popular_shelves`
+entries per book, so ~6 GB at 1M) → now a two-pass select: ids only in the heap, then
+re-stream and convert just the winners. `build_interactions` built
+`{user: {book: rating}}` at ~150 B/interaction — hundreds of GB on the full file →
+now counted per user in pass 1, then streamed into `array("i")` coordinate buffers
+(4 raw bytes each) under both a user cap and an interaction budget, handed to the new
+`cf_build.ease_from_X`. And `json.dumps(books)` materialized the whole catalog as one
+string → now written incrementally from shards.
+
+*Validated:* the streamed matrix is identical to the dict-built one (X equal, pop
+equal) and EASE through both entry points matches bit-for-bit (`max|Δ| = 0.000e+00`)
+on the real goodbooks ratings (5,976,479 ratings / 53,424 users).
+
+### G2. Encoding is the real ceiling, and it is hardware
+
+Measured on the dev machine (AMD Family 23 mobile APU, 4 cores, torch+MKL at
+**43.8 GFLOPS** fp32) with bge-small at 139 avg tokens:
+
+| config | throughput | 250k | 1M |
+|---|---|---|---|
+| `max_seq_length=512` (as served) | 4.4 books/s | ~16 h | ~63 h |
+| `max_seq_length=128` | 7.3 books/s | ~9.5 h | ~38 h |
+
+That is not a misconfiguration — bge-small is ~9 GFLOP/text at that length, so 4.4/s
+is exactly what 44 GFLOPS predicts. `OMP_NUM_THREADS=8` does not help (torch pins to
+the 4 physical cores). **Consequences:**
+
+- A large ingest is an *overnight-to-multi-day* job, and it is re-paid on every
+  encoder change — which makes the "bge-small is enough" finding (§E) load-bearing in
+  a way it wasn't at 22k.
+- Encoding is therefore **checkpointed** into `rec_*.jsonl` + `emb_*.npy` shard pairs;
+  a restart reloads finished shards and encodes only the missing tail. The `.npy` is
+  written last, so a half-written chunk is never mistaken for done.
+- For the full 1M, embed on a rented GPU rather than locally — a T4/A10 does it in
+  well under an hour. The shard layout is already the portable unit of work for that.
 
 ---
 
