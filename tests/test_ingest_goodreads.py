@@ -16,6 +16,7 @@ from ingest_goodreads_ucsd import (
     norm_language,
     pick_eval_users,
     select_top_book_ids,
+    shelves_to_genres,
     to_profiles,
 )
 
@@ -165,6 +166,39 @@ def test_eval_users_are_held_out_of_cf(tmp_path):
 def test_choose_users_excludes_eval_users():
     counts = {"u1": 100, "u2": 50, "u3": 10}
     assert set(choose_users(counts, exclude={"u1"})) == {"u2", "u3"}
+
+
+def test_shelves_to_genres_drops_shelf_states():
+    # "to-read" is on 94% of Goodreads books and "currently-reading" on 52%; emitting
+    # them as genres would make them the catalog's largest genres.
+    shelves = [
+        {"name": "to-read", "count": 9000},
+        {"name": "currently-reading", "count": 5000},
+        {"name": "owned", "count": 900},
+        {"name": "kindle", "count": 800},
+        {"name": "fantasy", "count": 400},
+        {"name": "mystery", "count": 100},
+    ]
+    assert shelves_to_genres(shelves) == ["fantasy, paranormal", "mystery, thriller, crime"]
+
+
+def test_shelves_to_genres_maps_onto_canonical_buckets():
+    # Synonyms must collapse, not multiply the vocabulary.
+    assert shelves_to_genres([{"name": "sci-fi", "count": 1}]) == ["fiction"]
+    assert shelves_to_genres([{"name": "nonfiction", "count": 1}]) == ["non-fiction"]
+    assert shelves_to_genres([{"name": "graphic-novels", "count": 1}]) == ["comics, graphic"]
+    assert shelves_to_genres([{"name": "memoir", "count": 1}]) == [
+        "history, historical fiction, biography"
+    ]
+    # same bucket twice -> one entry, order by shelf count
+    dup = [{"name": "horror", "count": 5}, {"name": "fantasy", "count": 9}]
+    assert shelves_to_genres(dup) == ["fantasy, paranormal"]
+
+
+def test_shelves_to_genres_empty_when_nothing_recognized():
+    # Better no genre than a wrong one: it just drops out of filters and calibration.
+    assert shelves_to_genres([{"name": "to-read", "count": 9000}]) == []
+    assert shelves_to_genres([]) == []
 
 
 def test_pick_eval_users_wants_moderate_readers():

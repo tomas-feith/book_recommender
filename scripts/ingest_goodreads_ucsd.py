@@ -107,6 +107,95 @@ _ISO2 = dict(
 )
 
 
+# The UCSD genres file uses exactly ten canonical buckets, but covers only ~83% of
+# books; the rest fall back to `popular_shelves`, which are mostly shelf *states*
+# ("to-read" is on 94% of books, "currently-reading" on 52%). Emitting those as genres
+# would make "to-read" the largest genre in the catalog and poison the genre
+# calibration, so the fallback is mapped onto the same ten buckets and anything
+# unrecognized is dropped -- one vocabulary for the whole catalog, never a shelf state.
+_G_FIC, _G_NON = "fiction", "non-fiction"
+_G_FAN, _G_MYS = "fantasy, paranormal", "mystery, thriller, crime"
+_G_HIS, _G_COM = "history, historical fiction, biography", "comics, graphic"
+_SHELF_TO_GENRE = {
+    "fiction": _G_FIC,
+    "literary-fiction": _G_FIC,
+    "classics": _G_FIC,
+    "novels": _G_FIC,
+    "science-fiction": _G_FIC,
+    "sci-fi": _G_FIC,
+    "scifi": _G_FIC,
+    "dystopia": _G_FIC,
+    "non-fiction": _G_NON,
+    "nonfiction": _G_NON,
+    "self-help": _G_NON,
+    "science": _G_NON,
+    "business": _G_NON,
+    "philosophy": _G_NON,
+    "psychology": _G_NON,
+    "religion": _G_NON,
+    "travel": _G_NON,
+    "cookbooks": _G_NON,
+    "essays": _G_NON,
+    "fantasy": _G_FAN,
+    "paranormal": _G_FAN,
+    "urban-fantasy": _G_FAN,
+    "supernatural": _G_FAN,
+    "horror": _G_FAN,
+    "vampires": _G_FAN,
+    "magic": _G_FAN,
+    "mystery": _G_MYS,
+    "thriller": _G_MYS,
+    "crime": _G_MYS,
+    "suspense": _G_MYS,
+    "detective": _G_MYS,
+    "mystery-thriller": _G_MYS,
+    "history": _G_HIS,
+    "biography": _G_HIS,
+    "memoir": _G_HIS,
+    "historical": _G_HIS,
+    "historical-fiction": _G_HIS,
+    "autobiography": _G_HIS,
+    "war": _G_HIS,
+    "comics": _G_COM,
+    "graphic-novels": _G_COM,
+    "graphic-novel": _G_COM,
+    "manga": _G_COM,
+    "comic-books": _G_COM,
+    "bd": _G_COM,
+    "romance": "romance",
+    "contemporary-romance": "romance",
+    "erotica": "romance",
+    "young-adult": "young-adult",
+    "ya": "young-adult",
+    "teen": "young-adult",
+    "children": "children",
+    "childrens": "children",
+    "kids": "children",
+    "picture-books": "children",
+    "middle-grade": "children",
+    "poetry": "poetry",
+    "poems": "poetry",
+}
+
+
+def shelves_to_genres(shelves: list[dict], limit: int = 5) -> list[str]:
+    """Map Goodreads ``popular_shelves`` onto the canonical buckets, most-shelved first.
+
+    Unrecognized shelves are dropped rather than passed through, so a book with only
+    ``to-read``/``owned`` ends up with no genre -- which is honest. An empty subject
+    list simply excludes it from genre filters and contributes nothing to the taste
+    distribution; a wrong one would actively mislead both.
+    """
+    out: list[str] = []
+    for s in sorted(shelves or [], key=lambda s: -_to_int(s.get("count"))):
+        g = _SHELF_TO_GENRE.get(str(s.get("name", "")).strip().lower())
+        if g and g not in out:
+            out.append(g)
+            if len(out) == limit:
+                break
+    return out
+
+
 def norm_language(code: str, title: str = "") -> str:
     """Normalize Goodreads' ``language_code`` to a 2-letter ISO 639-1 code.
 
@@ -250,10 +339,7 @@ def to_record(raw: dict, authors: dict[str, str], genres: dict[str, list[str]]) 
     bid = str(raw["book_id"])
     author_names = [authors.get(str(a.get("author_id")), "") for a in raw.get("authors", [])]
     author_names = [a for a in author_names if a][:2]
-    subs = genres.get(bid) or [
-        s["name"].lower()
-        for s in sorted(raw.get("popular_shelves", []), key=lambda s: -_to_int(s.get("count")))[:5]
-    ]
+    subs = genres.get(bid) or shelves_to_genres(raw.get("popular_shelves", []))
     year = _to_int(raw.get("publication_year")) or None
     return {
         "id": "gr:" + bid,
