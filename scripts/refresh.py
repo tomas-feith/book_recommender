@@ -92,10 +92,18 @@ def _app_ratings(order: set) -> dict[str, dict[str, float]]:
     return by_user
 
 
-def rebuild_cf(data_dir: Path = DATA, max_items: int = 30000) -> None:
-    from cf_build import ease_cf
+def rebuild_cf(data_dir: Path = DATA, max_items: int | None = None) -> None:
+    """Retrain EASE over goodbooks non-eval users + app swipes.
+
+    ``max_items`` defaults to ``cf_build.EASE_MAX_ITEMS`` rather than a local constant:
+    it decides the size of a dense inverse (~16·h² bytes at peak), so a stale duplicate
+    here is an OOM waiting for the catalog to grow into it.
+    """
+    from cf_build import EASE_MAX_ITEMS, ease_cf
 
     from app.store import save_cf
+
+    max_items = EASE_MAX_ITEMS if max_items is None else max_items
 
     order = _catalog_order()
     order_set = set(order)
@@ -137,10 +145,11 @@ def main() -> None:
     ap.add_argument(
         "--max-items",
         type=int,
-        default=30000,
+        default=None,
         help="Dense-EASE budget: solve item-item CF over the this-many most-rated books "
-        "(the rest fall to content). Bounds the O(H^3) inverse so the rebuild scales; "
-        "raise it for a bigger build box, lower it to speed the rebuild.",
+        "(the rest fall to content). Peak memory is ~16*h^2 bytes, so this is what "
+        "decides whether the rebuild finishes; defaults to cf_build.EASE_MAX_ITEMS "
+        "(20k ~ 6.4 GB). Raise it only on a box with the RAM to back it.",
     )
     args = ap.parse_args()
 

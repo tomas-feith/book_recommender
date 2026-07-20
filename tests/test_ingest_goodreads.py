@@ -7,12 +7,16 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from ingest_goodreads_ucsd import (
+    _check_shard_manifest,
     _dedup_digest,
     build_user_item,
     choose_users,
+    iter_records,
     norm_language,
     pick_eval_users,
     select_top_book_ids,
@@ -166,6 +170,25 @@ def test_eval_users_are_held_out_of_cf(tmp_path):
 def test_choose_users_excludes_eval_users():
     counts = {"u1": 100, "u2": 50, "u3": 10}
     assert set(choose_users(counts, exclude={"u1"})) == {"u2", "u3"}
+
+
+def test_shard_manifest_refuses_a_mismatched_resume(tmp_path):
+    # Resume keys on chunk index, so reusing shards from a run with a different
+    # --top-n would silently pair one run's records with another's embeddings.
+    work = tmp_path / "_shards"
+    work.mkdir()
+    _check_shard_manifest(work, {"top_n": 2000, "chunk": 5000, "model": "m"})
+    _check_shard_manifest(work, {"top_n": 2000, "chunk": 5000, "model": "m"})  # same: fine
+    with pytest.raises(SystemExit, match="different runs"):
+        _check_shard_manifest(work, {"top_n": 250000, "chunk": 5000, "model": "m"})
+
+
+def test_iter_records_survives_a_missing_book_id(tmp_path):
+    # select_top_book_ids defaults book_id to the enumeration index; to_record must
+    # agree, or it KeyErrors partway through a multi-hour encode.
+    books = _write_books(tmp_path, [{"title": "No Id Here", "ratings_count": 5}])
+    (rec,) = list(iter_records(books, {"0"}, {}, {}))
+    assert rec["id"] == "gr:0" and rec["title"] == "No Id Here"
 
 
 def test_shelves_to_genres_drops_shelf_states():

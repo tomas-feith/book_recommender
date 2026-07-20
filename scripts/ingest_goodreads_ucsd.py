@@ -53,6 +53,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from cf_build import EASE_MAX_ITEMS  # noqa: E402
 from hygiene import guess_language, norm_title  # noqa: E402
 
 from eval.data import book_to_text  # noqa: E402
@@ -216,10 +217,10 @@ def norm_language(code: str, title: str = "") -> str:
 MIN_RATED_PER_USER = 3  # users with too little signal add noise to CF
 MAX_USERS = 200_000  # cap CF training users to bound memory
 MAX_INTERACTIONS = 120_000_000  # ~1 GB of int32 CSR coordinates; the real RAM ceiling
-EMB_CHUNK = 20_000  # books encoded (and written) per chunk, so texts never all resident
-# EASE inverts an h*h float64 Gram and numpy returns the inverse as a second array,
-# so peak is ~16*h^2 bytes: 20k -> 6.4 GB, cf_build's own 30k default -> 14.4 GB.
-EASE_MAX_ITEMS = 20_000
+# Books encoded (and checkpointed) per chunk, so texts are never all resident. Sized by
+# how much work a crash may cost, not by throughput: at the measured 4.4 books/s a 20k
+# chunk risks 76 minutes, 5k risks 19. The extra shard files are free.
+EMB_CHUNK = 5_000
 # Eval-profile selection, mirroring build_real_dataset.py: focused, moderate readers,
 # not omnivores who rated a huge share of the catalog.
 PROF_MIN_RATED, PROF_MAX_RATED = 10, 40
@@ -327,11 +328,17 @@ def select_top_book_ids(books_path: Path, top_n: int, authors: dict[str, str]) -
 def iter_records(
     books_path: Path, keep_ids: set[str], authors: dict[str, str], genres: dict[str, list[str]]
 ):
-    """Second pass: yield slim catalog records for the selected books, in file order."""
+    """Second pass: yield slim catalog records for the selected books, in file order.
+
+    ``book_id`` is defaulted to the enumeration index exactly as in
+    :func:`select_top_book_ids`, so the two passes agree on the identity of a record
+    that lacks one -- and so ``to_record`` can't ``KeyError`` on it mid-encode.
+    """
     for i, raw in enumerate(stream_jsonl_gz(books_path)):
         if not raw.get("title"):
             continue
-        if str(raw.get("book_id", i)) in keep_ids:
+        raw.setdefault("book_id", i)
+        if str(raw["book_id"]) in keep_ids:
             yield to_record(raw, authors, genres)
 
 
@@ -354,30 +361,6 @@ def to_record(raw: dict, authors: dict[str, str], genres: dict[str, list[str]]) 
 
 
 # ---- interactions ------------------------------------------------------------
-
-
-def build_interactions(path: Path, keep: set) -> dict[str, dict[str, float]]:
-    """Stream interactions, keeping rated ones for selected books.
-
-    Returns {user_id: {gr_book_id: rating}}. Users with < MIN_RATED_PER_USER
-    ratings are dropped; the set is capped at MAX_USERS.
-
-    Only viable for small catalogs -- a Python dict-of-dicts costs ~150 bytes per
-    interaction, so the full Goodreads file (hundreds of millions of rated
-    interactions) needs :func:`build_user_item` instead.
-    """
-    by_user: dict[str, dict[str, float]] = defaultdict(dict)
-    for row in stream_jsonl_gz(path):
-        bid = "gr:" + str(row.get("book_id"))
-        rating = _to_int(row.get("rating"))
-        if rating >= 1 and bid in keep:
-            by_user[str(row["user_id"])][bid] = float(rating)
-    filtered = {u: r for u, r in by_user.items() if len(r) >= MIN_RATED_PER_USER}
-    if len(filtered) > MAX_USERS:
-        # deterministic cap: users with the most ratings (richest CF signal)
-        top = sorted(filtered.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:MAX_USERS]
-        filtered = dict(top)
-    return filtered
 
 
 def count_ratings_per_user(path: Path, keep: set[str]) -> dict[str, int]:
@@ -511,8 +494,34 @@ def to_profiles(eval_ratings: dict[str, dict[str, int]]) -> list[dict]:
 # ---- driver ------------------------------------------------------------------
 
 
+def _check_shard_manifest(work: Path, fingerprint: dict) -> None:
+    """Refuse to resume a shard set that was built for a different run.
+
+    Resume keys on chunk *index*, so shards from a previous run with a different
+    ``--top-n`` (or encoder) would be silently reused for entirely different books --
+    producing a catalog whose embeddings do not match its records, with nothing to
+    signal it. The failure is invisible and the artifact looks fine, so this refuses
+    loudly instead.
+    """
+    mf = work / "manifest.json"
+    if mf.exists():
+        prev = json.loads(mf.read_text(encoding="utf-8"))
+        if prev != fingerprint:
+            raise SystemExit(
+                f"Shard dir {work} was built for {prev}, but this run is {fingerprint}.\n"
+                f"Resuming would mix books from two different runs. Delete {work} to rebuild."
+            )
+    else:
+        mf.write_text(json.dumps(fingerprint, sort_keys=True), encoding="utf-8")
+
+
 def write_books_and_embed(
-    out_path: Path, records: Iterator[dict], encoder, chunk: int = EMB_CHUNK, work_dir=None
+    out_path: Path,
+    records: Iterator[dict],
+    encoder,
+    chunk: int = EMB_CHUNK,
+    work_dir=None,
+    fingerprint: dict | None = None,
 ) -> tuple[list[str], np.ndarray]:
     """Encode records chunk by chunk into shards, then assemble ``real_books.json``.
 
@@ -532,6 +541,7 @@ def write_books_and_embed(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     work = Path(work_dir) if work_dir else out_path.parent / "_shards"
     work.mkdir(parents=True, exist_ok=True)
+    _check_shard_manifest(work, fingerprint or {})
 
     shards: list[int] = []
     n_desc = 0
@@ -616,6 +626,7 @@ def ingest(
         data_dir / "real_books.json",
         iter_records(books_path, keep_raw, authors, genres),
         SentenceTransformerEmbedder(model),
+        fingerprint={"top_n": top_n, "chunk": EMB_CHUNK, "model": label},
     )
     del authors, genres, keep_raw
     col_of = {bid: i for i, bid in enumerate(order)}

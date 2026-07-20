@@ -23,6 +23,13 @@ from __future__ import annotations
 import numpy as np
 from scipy import sparse
 
+# EASE inverts an h×h float64 Gram and numpy returns the inverse as a *second* array,
+# so peak memory is ~16·h² bytes: 20k -> 6.4 GB, 30k -> 14.4 GB. This is the single
+# knob that decides whether a rebuild finishes or dies, so it lives here rather than
+# being re-declared per caller (refresh.py used to carry its own 30k default, which
+# OOMs a 10 GB box). Raise it only with the memory to back it.
+EASE_MAX_ITEMS = 20_000
+
 
 def _binary_user_item(order: list[str], by_user: dict[str, dict[str, float]]):
     """Return (X, pop): binary users×items CSR and per-item rating counts."""
@@ -63,7 +70,7 @@ def ease_cf(
     by_user: dict[str, dict[str, float]],
     lam: float = 1000.0,
     k: int = 50,
-    max_items: int = 30000,
+    max_items: int = EASE_MAX_ITEMS,
 ) -> tuple[sparse.csr_matrix, np.ndarray]:
     """Return (sim, pop): EASE-R item-item weights truncated to top-k per row.
 
@@ -96,7 +103,7 @@ def ease_from_X(
     pop: np.ndarray,
     lam: float = 1000.0,
     k: int = 50,
-    max_items: int = 30000,
+    max_items: int = EASE_MAX_ITEMS,
 ) -> tuple[sparse.csr_matrix, np.ndarray]:
     """EASE-R over a prebuilt binary users×items matrix -- see :func:`ease_cf`.
 
