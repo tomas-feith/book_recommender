@@ -22,6 +22,7 @@ constants and the "+35% EASE" win were all tuned at 10k and may not transfer.
 | 4 | Linear title search (`SequenceMatcher` over all books) | ~100k books | Inference (§C) | Onboarding unusable | ✅ Fixed (Phase 1, FTS) |
 | 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | ✅ Fixed (Phase 1, FAISS) |
 | 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | 🚧 Phase 2 started (`eval/served_eval`) |
+| 6b | Convex CF/content blend made cold books unreachable | any cold-heavy catalog | Ranking (§E1) | Fatal for the tail | ✅ Fixed (additive blend) |
 | 7 | Dedup / language / selection hygiene | any large ingest | Data source (§F) | Quality | ✅ Fixed (dedup/lang/selection); subjects/coverage remain |
 | 8 | Ingest adapter holds raw records + interactions in RAM | ~100k books / ~50M interactions | Data source (§G1) | Fatal (OOM at ingest) | ✅ Fixed (streamed) |
 | 9 | Encoding throughput — 4.4 books/s on this CPU | any large ingest | Ingest compute (§G2) | ~63 h for 1M locally | ⚠️ Hardware; checkpointed, GPU for 1M |
@@ -287,6 +288,56 @@ genre/language/year facets once into small artifacts.
 > Still to do: re-tune the constants below against this harness, run it on a real
 > (or stratified-sample) large catalog, and re-validate the encoder choice. The
 > original analysis follows.
+
+### E1. Cold Recall ≈ 0 was a scale bug in the blend, not a missing feature
+
+> **✅ Fixed — additive blend + sparse standardization** (`app/recommender.py`).
+
+The diagnosis, measured rather than assumed: `_scores` computed
+`w*_standardize(cf) + (1-w)*_standardize(content)`, but the CF channel is a sum over a
+top-k sparse matrix — **~96% of candidates score exactly 0**. That zero mass collapses
+the standard deviation, so the surviving few come out around **+57σ** while the dense
+content cosine tops out near **+4.5σ**. The blend added two quantities ~13× apart in
+scale, so *any* book with a single CF connection beat *every* pure-content book: cold
+share of the top-10 was **0.0%** against a 40% base rate, and the first cold book
+landed at rank ~140. The per-item `cf_weight` was working correctly; it was being
+overwhelmed by an artifact.
+
+Two changes, both selected by sweeping against the harness:
+
+1. **`_standardize_sparse`** — mean/std over the non-zero entries. Fixes the scale
+   while keeping CF *magnitude*. (Rank-normalizing both channels also fixes the scale,
+   but flattens "co-read 50×" against "co-read once" and cost **32% of warm Recall**.)
+2. **Additive blend** — `content + w*cf` rather than `w*cf + (1-w)*content`. Convexly,
+   a warm book was scored on CF and a cold book on content: two different quantities
+   compared directly. Additively every book shares the content baseline and CF is
+   evidence *on top*. **This mattered more than the normalizer.** It also handles a
+   warm book that nothing co-read: its CF term goes negative, so it correctly falls
+   below a cold book of equal content fit.
+
+**Swept across cold fraction**, because 40% is the current catalog but 250k is ~92%
+CF-cold and 1M ~98% (EASE trains the warm head only), and aggregate ≈ `(1-f)·warm +
+f·cold` — so tuning at f=0.4 optimizes for a catalog we are about to stop having:
+
+| scheme | f=0.40 | f=0.70 | f=0.90 | f=0.95 |
+|---|---|---|---|---|
+| convex z (old) | 0.206 | 0.096 | 0.106 | 0.118 |
+| convex rank | 0.189 | 0.130 | 0.111 | 0.119 |
+| convex z-nonzero | 0.208 | 0.118 | 0.112 | 0.119 |
+| **additive z-nonzero** | **0.222** | **0.136** | **0.118** | **0.124** |
+| additive rank | 0.104 | 0.078 | 0.031 | 0.018 |
+
+Additive wins at *every* fraction. End to end at f=0.40, exact retrieval: warm
+0.348 → **0.360**, cold 0.000 → **0.017**, all 0.206 → **0.222**, coverage 0.024 →
+0.026; via FAISS cold 0.017 → **0.075**, coverage 0.025 → **0.034**. Warm *improves*
+rather than being traded away, so this is not a cold-vs-warm tradeoff.
+
+*(`additive rank` collapsing to cold ≡ 0.000 at every f confirms the mechanism from
+the other side: a bounded non-negative `rank(cf) ∈ [0,1]` bonus means any CF
+connection always wins, which is the original bug in miniature.)*
+
+**Still open:** coverage is still ~3%, so the long tail remains largely unreachable —
+a genuine exploration slot is a separate lever from this fix.
 
 Every constant and conclusion was fit on ≤10k warm, popular, mostly-English books:
 
