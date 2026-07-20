@@ -62,13 +62,48 @@ DATA = ROOT / "data"
 # Goodreads mixes ISO 639-1 ("nl") and 639-2 ("dut") in the same field, so the
 # language filter silently misses books unless we normalize to one alphabet.
 _ISO2 = dict(
-    p.split(":")
-    for p in (
-        "eng:en spa:es fre:fr fra:fr ger:de deu:de ita:it por:pt dut:nl nld:nl "
-        "rus:ru jpn:ja chi:zh zho:zh kor:ko ara:ar heb:he gre:el ell:el pol:pl "
-        "swe:sv dan:da nor:no fin:fi tur:tr cze:cs ces:cs hun:hu ind:id vie:vi "
-        "tha:th hin:hi ukr:uk ron:ro rum:ro cat:ca lat:la per:fa fas:fa"
-    ).split()
+    pair.split(":")
+    for pair in (
+        "eng:en",
+        "spa:es",
+        "fre:fr",
+        "fra:fr",
+        "ger:de",
+        "deu:de",
+        "ita:it",
+        "por:pt",
+        "dut:nl",
+        "nld:nl",
+        "rus:ru",
+        "jpn:ja",
+        "chi:zh",
+        "zho:zh",
+        "kor:ko",
+        "ara:ar",
+        "heb:he",
+        "gre:el",
+        "ell:el",
+        "pol:pl",
+        "swe:sv",
+        "dan:da",
+        "nor:no",
+        "fin:fi",
+        "tur:tr",
+        "cze:cs",
+        "ces:cs",
+        "hun:hu",
+        "ind:id",
+        "vie:vi",
+        "tha:th",
+        "hin:hi",
+        "ukr:uk",
+        "ron:ro",
+        "rum:ro",
+        "cat:ca",
+        "lat:la",
+        "per:fa",
+        "fas:fa",
+    )
 )
 
 
