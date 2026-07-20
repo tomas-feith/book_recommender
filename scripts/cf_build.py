@@ -23,12 +23,21 @@ from __future__ import annotations
 import numpy as np
 from scipy import sparse
 
-# EASE inverts an h×h float64 Gram and numpy returns the inverse as a *second* array,
-# so peak memory is ~16·h² bytes: 20k -> 6.4 GB, 30k -> 14.4 GB. This is the single
-# knob that decides whether a rebuild finishes or dies, so it lives here rather than
-# being re-declared per caller (refresh.py used to carry its own 30k default, which
-# OOMs a 10 GB box). Raise it only with the memory to back it.
-EASE_MAX_ITEMS = 20_000
+# EASE holds two h×h float64 arrays live at peak (the Gram and its inverse), so it costs
+# ~16·h² bytes on top of the interaction matrix: 10k -> 1.6 GB, 20k -> 6.4 GB,
+# 30k -> 14.4 GB. This is the single knob deciding whether a rebuild finishes or dies,
+# so it lives here rather than per caller (refresh.py carried its own 30k default).
+#
+# 10k is set from *measured* headroom, not the machine's nominal RAM: a 10 GB box shows
+# only ~3-5 GB actually available, and at h=20000 the build paged ~2.3 GB while still
+# assembling the Gram, before the O(h³) inverse began. At h=10000 a worst-case build
+# (200k users, 40M interactions, near-dense Gram) completes in 193 s. It also leaves the
+# current catalog bit-identical, whose warm set is exactly 10000.
+#
+# The real lesson is that a dense inverse is the wrong algorithm past ~10k items on this
+# hardware, which makes MF/iALS for the tail (docs §B1) the binding constraint on CF
+# coverage rather than an optimization: at 250k this covers the top 4% of the catalog.
+EASE_MAX_ITEMS = 10_000
 
 
 def _binary_user_item(order: list[str], by_user: dict[str, dict[str, float]]):
@@ -52,17 +61,48 @@ def _binary_user_item(order: list[str], by_user: dict[str, dict[str, float]]):
     return X, pop
 
 
-def _topk_rows(B: np.ndarray, k: int) -> sparse.csr_matrix:
-    """Keep each row's top-k entries by value; return a CSR matrix."""
+def _topk_rows(B: np.ndarray, k: int, block: int = 2048) -> sparse.csr_matrix:
+    """Keep each row's top-k entries by value; return a CSR matrix.
+
+    Row-blocked on purpose. The obvious whole-matrix form allocates ``-B``, an int64
+    ``argpartition`` result and a ``zeros_like`` -- three more h×h arrays on top of B
+    itself, i.e. ~12.8 GB at h=20000 where each array is 3.2 GB. Blocking bounds the
+    temporaries to ``block`` rows and emits the CSR pieces directly, so cost is O(h·k)
+    instead of O(h²).
+    """
     n = B.shape[0]
     if k >= n:
-        keep = B
-    else:
-        idx = np.argpartition(-B, k, axis=1)[:, :k]  # k largest per row
-        keep = np.zeros_like(B)
-        ri = np.arange(n)[:, None]
-        keep[ri, idx] = B[ri, idx]
-    return sparse.csr_matrix(keep.astype(np.float32))
+        return sparse.csr_matrix(B.astype(np.float32))
+    rows, cols, vals = [], [], []
+    for lo in range(0, n, block):
+        hi = min(lo + block, n)
+        chunk = B[lo:hi]
+        idx = np.argpartition(-chunk, k, axis=1)[:, :k]  # k largest per row
+        ri = np.arange(hi - lo)[:, None]
+        rows.append(np.repeat(np.arange(lo, hi), k))
+        cols.append(idx.ravel())
+        vals.append(chunk[ri, idx].ravel().astype(np.float32))
+    return sparse.csr_matrix(
+        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n, n),
+        dtype=np.float32,
+    )
+
+
+def _item_gram(Xw: sparse.csr_matrix, h: int, block: int = 2048) -> np.ndarray:
+    """Dense item-item Gram ``Xw.T @ Xw``, filled a column block at a time.
+
+    ``(Xw.T @ Xw).todense()`` materializes a sparse intermediate first, and at 20k
+    popular items that product is nearly dense -- ~4e8 stored entries, ~4.8 GB of CSR,
+    before the dense copy. Writing straight into a preallocated dense array skips it.
+    """
+    G = np.empty((h, h), dtype=np.float64)
+    XwT = Xw.T.tocsr()
+    Xc = Xw.tocsc()  # column slicing is what CSC is for
+    for lo in range(0, h, block):
+        hi = min(lo + block, h)
+        G[:, lo:hi] = (XwT @ Xc[:, lo:hi]).toarray()
+    return G
 
 
 def ease_cf(
@@ -121,13 +161,19 @@ def ease_from_X(
     h = len(warm)
 
     # Closed-form EASE on the warm sub-catalog: G = XᵀX (item Gram); B[i,j] = -P[i,j]/P[j,j].
-    Xw = X[:, warm]
-    G = np.asarray((Xw.T @ Xw).todense(), dtype=np.float64)
+    # Written to keep only TWO h×h arrays live at once (~16·h² bytes): the naive form
+    # holds G, P and B together and then three more inside the top-k, which is ~9.6 GB
+    # and ~12.8 GB at h=20000.
+    Xw = X[:, warm].tocsr()
+    G = _item_gram(Xw, h)
     G[np.diag_indices(h)] += lam
     P = np.linalg.inv(G)
-    B = -P / np.diag(P)
-    np.fill_diagonal(B, 0.0)
-    block = _topk_rows(B, k).tocoo()  # (h, h) top-k per warm row
+    del G  # free before deriving B, which is the peak
+    diag = np.diag(P).copy()
+    P /= -diag  # in place: P becomes B = -P / diag(P)
+    np.fill_diagonal(P, 0.0)
+    block = _topk_rows(P, k).tocoo()  # (h, h) top-k per warm row
+    del P
 
     # Scatter the warm block back to full catalog coordinates; cold items stay empty.
     sim = sparse.csr_matrix(
