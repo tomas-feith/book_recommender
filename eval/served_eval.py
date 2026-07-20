@@ -134,6 +134,15 @@ def main() -> None:
         default=None,
         help="profiles JSON (default: <data>/real_profiles.json, else data/real_profiles.json)",
     )
+    ap.add_argument(
+        "--split",
+        choices=["blind", "natural"],
+        default="blind",
+        help="How to define cold. 'blind' simulates it by zeroing CF+pop for a random "
+        "--cold-frac (comparable across catalogs). 'natural' blinds nothing and splits "
+        "on whether a book actually HAS a CF row -- the division a real catalog has "
+        "once it outgrows the EASE budget.",
+    )
     args = ap.parse_args()
 
     cat = Catalog.load(args.data)
@@ -145,15 +154,23 @@ def main() -> None:
         else DATA / "real_profiles.json"
     )
     profiles = load_profiles(prof_path)
-    rng = np.random.default_rng(args.seed)
-    cold = np.zeros(len(cat), dtype=bool)
-    cold[rng.choice(len(cat), size=int(len(cat) * args.cold_frac), replace=False)] = True
-    blind_cold(cat, np.where(cold)[0])
+    if args.split == "natural":
+        # No blinding: the catalog already has the split. EASE solves over the warm
+        # head only, so past that budget a book can be popularity-warm yet have no CF
+        # row at all -- at 100k that is ~90% of the catalog. Simulating cold by
+        # blinding a random fraction measures a population this catalog doesn't have.
+        cold = np.diff(cat.sim.indptr) == 0
+        label = f"{int(cold.sum())} naturally CF-less ({cold.mean():.0%})"
+    else:
+        rng = np.random.default_rng(args.seed)
+        cold = np.zeros(len(cat), dtype=bool)
+        cold[rng.choice(len(cat), size=int(len(cat) * args.cold_frac), replace=False)] = True
+        blind_cold(cat, np.where(cold)[0])
+        label = f"{int(cold.sum())} blinded cold ({args.cold_frac:.0%})"
 
     print(
-        f"\nSERVED recommender | {len(cat)} books | {int(cold.sum())} blinded cold "
-        f"({args.cold_frac:.0%}) | {len(profiles)} users | hold-out={args.k_holdout} | "
-        f"eval@{args.k} | {args.seeds} splits/user"
+        f"\nSERVED recommender | {len(cat)} books | {label} | {len(profiles)} users | "
+        f"hold-out={args.k_holdout} | eval@{args.k} | {args.seeds} splits/user"
     )
     header = (
         f"{'retrieval':<12} {'warm R@K':>9} {'cold R@K':>9} {'all R@K':>8} "

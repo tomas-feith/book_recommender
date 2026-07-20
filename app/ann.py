@@ -28,6 +28,11 @@ except Exception:  # pragma: no cover - exercised only where faiss is absent
 
 # Below this the exact scan (a single GEMV) beats IVF training + probe overhead.
 ANN_MIN = 50_000
+# Probe ~1/NPROBE_DIV of the cells, so search width tracks catalog size instead of
+# decaying against a growing nlist. At 100k this lands on ~126 (nlist 1264), the setting
+# measured at 0.988 recall@10; at 1M it gives 400 rather than a token 3% of the index.
+NPROBE_DIV = 10
+NPROBE_MIN = 48  # never search narrower than the old constant
 
 
 def _pq_subquantizers(d: int) -> int:
@@ -46,8 +51,21 @@ class ANNIndex:
         self.dim = dim
 
     @classmethod
-    def build(cls, emb: np.ndarray, nprobe: int = 48) -> ANNIndex | None:
-        """Build an IVF-PQ index over ``emb`` (N, D), or ``None`` if ANN doesn't apply."""
+    def build(cls, emb: np.ndarray, nprobe: int | None = None) -> ANNIndex | None:
+        """Build an IVF-PQ index over ``emb`` (N, D), or ``None`` if ANN doesn't apply.
+
+        ``nprobe`` defaults to a **fraction of nlist**, not a constant. It was 48, which
+        silently decayed with catalog size: ``nlist`` grows as 4·√N, so 48 probes 21% of
+        the cells at 22.6k, 10% at 100k and 3.2% at 1M. Measured on the real 100k
+        catalog against exact content ranking, recall@10 of the retrieved set is 0.735
+        at nprobe=16, 0.912 at 48, and 0.988 at 128 -- so the old constant was dropping
+        ~8% of the true top-10, and would drop far more at 1M.
+
+        Retrieval *depth* is deliberately not the knob: the same sweep found recall@10
+        identical at depth 2000, 5000 and 20000, because IVF-PQ can only return what is
+        inside the probed cells. Widening the search fixes recall; asking for more
+        candidates just adds rerank work.
+        """
         n = len(emb)
         if faiss is None or n < ANN_MIN:
             return None
@@ -60,7 +78,8 @@ class ANNIndex:
         x = np.ascontiguousarray(emb, dtype=np.float32)
         index.train(x)
         index.add(x)
-        index.nprobe = int(min(nlist, nprobe))
+        want = max(NPROBE_MIN, nlist // NPROBE_DIV) if nprobe is None else nprobe
+        index.nprobe = int(min(nlist, want))
         return cls(index, d)
 
     @classmethod
