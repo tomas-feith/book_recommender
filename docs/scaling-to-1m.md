@@ -339,6 +339,56 @@ connection always wins, which is the original bug in miniature.)*
 **Still open:** coverage is still ~3%, so the long tail remains largely unreachable —
 a genuine exploration slot is a separate lever from this fix.
 
+### E2. Measured on a real 100k catalog — CF coverage is the binding constraint
+
+The 100k Goodreads ingest (§G) gave the first measurement outside the 22.6k regime
+everything was tuned in. `served_eval --split natural` splits on whether a book
+actually *has* a CF row, which is the division a real catalog has once it outgrows the
+EASE budget — 90,000 of 100,000 books here:
+
+| retrieval | warm (10k, CF-backed) | cold (90k, content-only) | all | coverage | ms/call |
+|---|---|---|---|---|---|
+| exact | 0.242 | 0.008 | 0.180 | 0.013 | 160 |
+| faiss | 0.210 | 0.040 | 0.165 | 0.018 | 9.4 |
+
+Two things this settles.
+
+**The exact scan is no longer viable**: 160 ms/call at 100k, ~1.5 s extrapolated to 1M.
+FAISS is 17× faster and is now the serving path, not an option.
+
+**The faiss/exact gap is selection bias, not retrieval loss.** A sweep against exact
+content ranking on this catalog measured the retrieved set's recall@10 at 0.735
+(nprobe=16), 0.912 (48, the old constant) and 0.988 (128) — and retrieval *depth* made
+no difference at all (identical at 2000/5000/20000, since IVF-PQ only returns what is
+inside the probed cells). Raising nprobe to `nlist//10` moved end-to-end Recall by
+**0.001**. The ANN was never the bottleneck; faiss simply trades head for tail.
+
+**A discriminator experiment then isolated the real cause.** Two controlled comparisons:
+
+| A. same books (CF-backed head, 10k pool) | Recall@10 | | B. content-only, matched 10k pools | Recall@10 |
+|---|---|---|---|---|
+| content only | 0.078 | | head targets | 0.078 |
+| CF only | **0.201** | | tail targets | **0.097** |
+| blend | 0.209 | | | |
+
+Content ranking is **not** weak on the tail — it is *better* there (0.097 vs 0.078),
+plausibly because tail books are distinctive while the head is full of broadly-popular
+books that match every profile mushily. So a better encoder is not the lever. What is
+true is that **CF is 2.6× content on identical books**, and the blend adds only +0.008
+over CF alone: where CF exists it dominates, and it reaches 10% of the catalog.
+
+So the tail's ~0.008 Recall is **crowding, not incapacity** — it loses a competition
+against a 2.6×-stronger signal in a pool 10× larger. And it is not an ignorable slice:
+**27.6% of users' liked books are in the CF-less tail.**
+
+⇒ **The lever is CF coverage** (§B1's iALS/MF), not the encoder, not the ANN, not the
+blend. A dense inverse is capped at ~10k items by measured memory; iALS is O(N·k) and
+covers the whole catalog.
+
+*(Secondary: `POP_REF` is now nearly vestigial — with `cf_weight` gated on having a CF
+row, the log-scaling barely matters. And the content channel's small marginal
+contribution suggests the blend can be simplified once CF coverage is broad.)*
+
 Every constant and conclusion was fit on ≤10k warm, popular, mostly-English books:
 
 - `POP_REF = 500` assumes books reach ~500 ratings. At 1M almost none do ⇒
