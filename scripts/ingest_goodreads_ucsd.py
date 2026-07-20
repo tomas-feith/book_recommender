@@ -136,6 +136,7 @@ EASE_MAX_ITEMS = 20_000
 PROF_MIN_RATED, PROF_MAX_RATED = 10, 40
 PROF_MIN_LIKES, PROF_MAX_LIKES = 6, 25
 PROF_MAX_USERS = 120
+PROF_POOL_MULT = 6  # over-select candidates; the like-count filter runs in pass 2
 
 
 def stream_jsonl_gz(path: Path) -> Iterable[dict]:
@@ -334,16 +335,23 @@ def choose_users(
     return chosen
 
 
-def pick_eval_users(counts: dict[str, int]) -> set[str]:
+def pick_eval_users(counts: dict[str, int], pool_mult: int = PROF_POOL_MULT) -> set[str]:
     """Users held out to become evaluation profiles -- never used for CF training.
 
     Mirrors ``build_real_dataset.build_profiles``: moderate, focused readers. Selected
     from the pass-1 counts so the choice is made before any CF matrix is built, which
     is what keeps the split honest -- ``choose_users`` then excludes them, so EASE
     never sees a held-out user's ratings.
+
+    Deliberately over-selects. Pass 1 only knows how many books a user rated, not how
+    many they *liked*, and ``to_profiles`` then drops anyone under ``PROF_MIN_LIKES``.
+    Picking exactly ``PROF_MAX_USERS`` here would silently yield however many survive
+    that filter -- possibly half -- and a thin profile set makes Recall noisy. So take
+    a pool and cap after filtering. Holding out a few hundred extra users costs the CF
+    matrix nothing against ~200k training users.
     """
     eligible = sorted(u for u, c in counts.items() if PROF_MIN_RATED <= c <= PROF_MAX_RATED)
-    return set(eligible[:PROF_MAX_USERS])
+    return set(eligible[: PROF_MAX_USERS * pool_mult])
 
 
 def build_user_item(
@@ -411,7 +419,7 @@ def to_profiles(eval_ratings: dict[str, dict[str, int]]) -> list[dict]:
         if PROF_MIN_LIKES <= len(likes) <= PROF_MAX_LIKES:
             profiles.append({"user": f"gr_{uid}", "likes": likes, "dislikes": dislikes})
     profiles.sort(key=lambda p: (len(p["dislikes"]) > 0, p["user"]), reverse=True)
-    return profiles
+    return profiles[:PROF_MAX_USERS]
 
 
 # ---- driver ------------------------------------------------------------------

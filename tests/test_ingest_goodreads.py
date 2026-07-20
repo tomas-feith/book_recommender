@@ -172,6 +172,19 @@ def test_pick_eval_users_wants_moderate_readers():
     assert pick_eval_users(counts) == {"moderate"}
 
 
+def test_pick_eval_users_over_selects_then_caps():
+    # Pass 1 can't see like-counts, so the pool must exceed the final profile cap --
+    # otherwise the like filter in to_profiles silently shrinks the eval set.
+    counts = {f"u{i:04d}": 20 for i in range(5000)}
+    assert len(pick_eval_users(counts, pool_mult=1)) == 120
+    assert len(pick_eval_users(counts)) == 120 * 6
+
+
+def test_to_profiles_caps_at_max_users():
+    ratings = {f"u{i}": {f"gr:{j}": 5 for j in range(8)} for i in range(500)}
+    assert len(to_profiles(ratings)) == 120
+
+
 def test_to_profiles_splits_likes_and_dislikes():
     ratings = {"u": {f"gr:{i}": 5 for i in range(8)} | {"gr:90": 1, "gr:91": 2}}
     (prof,) = to_profiles(ratings)
