@@ -10,12 +10,21 @@ per-book rating counts), so ``store.save_cf`` / ``load_cf`` and the recommender'
   the 10k catalog (0.262 -> 0.355), and truncating B to each item's top-k columns
   keeps ~all of it at ~4 MB. This is the default.
 
+* :func:`ials_cf` -- **implicit ALS** (Hu/Koren/Volinsky 2008). Learns low-rank user
+  and item factors by alternating ridge solves, then converts the item factors into the
+  same top-k item-item matrix. Its reason to exist is **coverage**: EASE inverts an
+  item×item Gram, which caps at ~10k items on this hardware, while iALS is O(nnz·k² +
+  N·k³) time and O(N·k) memory -- so it covers the *whole* catalog. Measured on the
+  real 100k catalog, CF beats content 2.6x on the books it covers (Recall@10 0.201 vs
+  0.078) and reached only 10% of them, which is what made this the binding constraint
+  rather than the encoder or the ANN (docs §E2).
+
 * :func:`sparse_topk_cf` -- the older **adjusted-cosine KNN** builder (kept for
   comparison and as a dependency-light fallback). A dense N×N matrix is O(N²) and
   mostly near-zero, so we keep each book's top-k neighbors, built block-wise.
 
 A dense 10k×10k matrix would be ~400 MB (>git's 100 MB limit, ~2 GB RAM); the
-sparse top-k output of either builder is ~5-10 MB with no ranking loss.
+sparse top-k output of any builder is ~5-10 MB with no ranking loss.
 """
 
 from __future__ import annotations
@@ -182,6 +191,166 @@ def ease_from_X(
         dtype=np.float32,
     )
     return sim, pop
+
+
+def _als_half(
+    Y: np.ndarray, Xr: sparse.csr_matrix, reg: float, alpha: float, out: np.ndarray
+) -> None:
+    """One ALS half-step: solve for every row of ``out`` given fixed factors ``Y``.
+
+    The Hu/Koren/Volinsky trick is that the normal equations for row ``u`` are
+    ``(YᵀY + α·Y_uᵀY_u + λI) x_u = (1+α)·Σ_{i∈u} y_i``, where ``Y_u`` is just the rows
+    ``u`` interacted with. ``YᵀY`` is computed once for all rows (k×k), so each row only
+    pays for its own non-zeros -- which is what makes this O(nnz·k²) instead of
+    O(users·items·k).
+    """
+    k = Y.shape[1]
+    G = Y.T @ Y + reg * np.eye(k, dtype=np.float64)
+    indptr, indices = Xr.indptr, Xr.indices
+    for u in range(Xr.shape[0]):
+        lo, hi = indptr[u], indptr[u + 1]
+        if lo == hi:
+            out[u] = 0.0
+            continue
+        Yu = Y[indices[lo:hi]]  # (n_u, k)
+        A = G + alpha * (Yu.T @ Yu)
+        b = (1.0 + alpha) * Yu.sum(axis=0)
+        out[u] = np.linalg.solve(A, b)
+
+
+def ials_cf(
+    X: sparse.csr_matrix,
+    pop: np.ndarray,
+    k: int = 50,
+    factors: int = 64,
+    iters: int = 12,
+    reg: float = 10.0,
+    alpha: float = 10.0,
+    seed: int = 0,
+    block: int = 512,
+) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """Return (sim, pop): implicit-ALS item factors reduced to top-k item-item.
+
+    Same output contract as :func:`ease_cf`, so nothing downstream changes -- but it
+    covers **every item with an interaction** instead of the ``EASE_MAX_ITEMS`` head,
+    because it never forms an item×item matrix. Memory is ``(users + items) × factors``
+    floats (a few tens of MB at 100k items) rather than ``16·h²`` bytes.
+
+    ``alpha`` is the confidence weight on observed interactions (implicit feedback has
+    no negatives -- unobserved is *low confidence* zero, not a dislike). ``factors`` and
+    ``iters`` trade fit against build time.
+
+    The defaults are deliberately *more regularized* than the Hu/Koren/Volinsky paper's
+    ``alpha=40``: that figure is for play counts, whereas binary feedback makes it a
+    confidence of 41-vs-1 on every observed cell. On a planted two-community synthetic,
+    ``reg=0.05, alpha=40`` put only 75% of each item's neighbours in its own community
+    and got *worse* with more factors and more iterations -- overfitting -- while
+    ``reg=10, alpha=10`` hits 100% at every setting tried. These still want tuning
+    against ``eval/served_eval.py`` on a real catalog; the synthetic only establishes
+    that the solver is right and that the aggressive defaults were not.
+
+    The final step converts factors to the served format: a blocked ``V @ Vᵀ`` keeping
+    each row's top-``k``. That is O(N²·f) work but streams in row blocks, so memory is
+    ``block × N`` rather than N².
+    """
+    rng = np.random.default_rng(seed)
+    n_users, n_items = X.shape
+    Xr = X.tocsr()
+    Xc = X.T.tocsr()  # items × users, for the item half-step
+
+    U = np.zeros((n_users, factors), dtype=np.float64)
+    V = rng.standard_normal((n_items, factors)) * 0.01
+
+    for _ in range(iters):
+        _als_half(V, Xr, reg, alpha, U)
+        _als_half(U, Xc, reg, alpha, V)
+
+    return _topk_from_factors(V, k=k, block=block), pop
+
+
+def _row_normalize(sim: sparse.csr_matrix) -> sparse.csr_matrix:
+    """Scale each row to unit sum, so a row's *shape* carries the signal, not its scale.
+
+    Required before mixing builders. Measured on the real 100k catalog, EASE weights
+    average 0.021 with row sums ~1.06, while iALS cosines average 0.898 with row sums
+    ~44.9 -- a 43x difference. ``_cf_sum`` adds these across a user's likes, so an
+    unnormalized merge would let whichever block has the larger scale win every
+    comparison regardless of fit.
+    """
+    out = sim.copy().astype(np.float32)
+    rs = np.asarray(out.sum(axis=1)).ravel()
+    rs[rs <= 0] = 1.0
+    out = sparse.diags((1.0 / rs).astype(np.float32)) @ out
+    return out.tocsr()
+
+
+def hybrid_cf(
+    X: sparse.csr_matrix,
+    pop: np.ndarray,
+    k: int = 50,
+    max_items: int = EASE_MAX_ITEMS,
+    **ials_kwargs,
+) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """EASE rows for the popular head, iALS rows for everything else.
+
+    Neither builder wins outright. Measured on the real 100k catalog with a fixed
+    popularity split at 10k, EASE gets Recall@10 0.242 on the head and 0.008 on the
+    tail; iALS gets 0.169 and 0.104. EASE is the stronger model where its O(N³) solve
+    fits, and iALS is the only one that reaches the other 90% -- so use each where it
+    wins, which is what docs §B1 meant by "add MF/iALS *for the tail*".
+
+    Rows are the unit of choice because ``_cf_sum`` scores a candidate from its own row.
+    Both blocks are row-normalized first (see :func:`_row_normalize`); without that the
+    iALS block's ~43x larger values would bury the EASE block.
+    """
+    warm = np.where(pop > 0)[0]
+    head = warm[np.argsort(-pop[warm], kind="stable")[:max_items]]
+
+    ease, _ = ease_from_X(X, pop, k=k, max_items=max_items)
+    ials, _ = ials_cf(X, pop, k=k, **ials_kwargs)
+    ease, ials = _row_normalize(ease), _row_normalize(ials)
+
+    # Keep EASE rows for the head, iALS rows for the rest.
+    is_head = np.zeros(X.shape[1], dtype=bool)
+    is_head[head] = True
+    keep_e = sparse.diags(is_head.astype(np.float32))
+    keep_i = sparse.diags((~is_head).astype(np.float32))
+    sim = ((keep_e @ ease) + (keep_i @ ials)).tocsr()
+    sim.eliminate_zeros()
+    return sim, pop
+
+
+def _topk_from_factors(V: np.ndarray, k: int, block: int = 512) -> sparse.csr_matrix:
+    """Top-k item-item similarity from factors, in row blocks.
+
+    Cosine over factors (not raw dot) so a popular item with a large-norm vector does
+    not dominate every row's neighbour list -- the served ``_cf_sum`` adds these up
+    across a user's likes, so unnormalized magnitudes would reintroduce a popularity
+    bias the adaptive blend is meant to control.
+    """
+    n = V.shape[0]
+    Vn = np.ascontiguousarray(V, dtype=np.float32)
+    norms = np.linalg.norm(Vn, axis=1, keepdims=True)
+    np.divide(Vn, np.maximum(norms, 1e-8), out=Vn)
+
+    rows, cols, vals = [], [], []
+    kk = min(k, n - 1)
+    for lo in range(0, n, block):
+        hi = min(lo + block, n)
+        S = Vn[lo:hi] @ Vn.T  # (b, n)
+        S[np.arange(hi - lo), np.arange(lo, hi)] = -np.inf  # no self-similarity
+        idx = np.argpartition(-S, kk, axis=1)[:, :kk]
+        ri = np.arange(hi - lo)[:, None]
+        rows.append(np.repeat(np.arange(lo, hi), kk))
+        cols.append(idx.ravel())
+        vals.append(S[ri, idx].ravel())
+    v = np.concatenate(vals)
+    keep = v > 0  # negative "similarity" is not evidence of co-reading
+    return sparse.csr_matrix(
+        (v[keep], (np.concatenate(rows)[keep], np.concatenate(cols)[keep])),
+        shape=(n, n),
+        dtype=np.float32,
+    )
 
 
 def sparse_topk_cf(

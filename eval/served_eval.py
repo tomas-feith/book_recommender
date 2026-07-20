@@ -136,12 +136,21 @@ def main() -> None:
     )
     ap.add_argument(
         "--split",
-        choices=["blind", "natural"],
+        choices=["blind", "natural", "poprank"],
         default="blind",
         help="How to define cold. 'blind' simulates it by zeroing CF+pop for a random "
         "--cold-frac (comparable across catalogs). 'natural' blinds nothing and splits "
-        "on whether a book actually HAS a CF row -- the division a real catalog has "
-        "once it outgrows the EASE budget.",
+        "on whether a book actually HAS a CF row. 'poprank' splits on popularity rank "
+        "at --head-size -- a FIXED population, so two CF builders with different "
+        "coverage stay comparable ('natural' degenerates under a builder that covers "
+        "everything).",
+    )
+    ap.add_argument(
+        "--head-size",
+        type=int,
+        default=10_000,
+        help="poprank split: books outside the top-N by popularity count as tail "
+        "(default 10000 = the dense-EASE budget, i.e. the books EASE can reach).",
     )
     args = ap.parse_args()
 
@@ -154,7 +163,17 @@ def main() -> None:
         else DATA / "real_profiles.json"
     )
     profiles = load_profiles(prof_path)
-    if args.split == "natural":
+    if args.split == "poprank":
+        # A fixed population, defined by the catalog rather than by whichever CF builder
+        # produced this matrix. 'natural' asks "does this book have CF?", which makes
+        # EASE (10k covered) and iALS (100k covered) answer different questions about
+        # different books. Ranking by popularity and cutting at the dense-EASE budget
+        # holds the buckets still, so the A/B measures quality, not bookkeeping.
+        rank = np.argsort(-cat.pop, kind="stable")
+        cold = np.ones(len(cat), dtype=bool)
+        cold[rank[: args.head_size]] = False
+        label = f"{int(cold.sum())} outside the top-{args.head_size} by popularity"
+    elif args.split == "natural":
         # No blinding: the catalog already has the split. EASE solves over the warm
         # head only, so past that budget a book can be popularity-warm yet have no CF
         # row at all -- at 100k that is ~90% of the catalog. Simulating cold by
