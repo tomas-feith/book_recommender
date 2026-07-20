@@ -39,6 +39,7 @@ import gzip
 import heapq
 import json
 import sys
+import time
 from array import array
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
@@ -260,47 +261,77 @@ def build_user_item(
 
 
 def write_books_and_embed(
-    out_path: Path, records: Iterator[dict], encoder, chunk: int = EMB_CHUNK
+    out_path: Path, records: Iterator[dict], encoder, chunk: int = EMB_CHUNK, work_dir=None
 ) -> tuple[list[str], np.ndarray]:
-    """Stream records to ``real_books.json`` while encoding them chunk by chunk.
+    """Encode records chunk by chunk into shards, then assemble ``real_books.json``.
 
     Two things that are fine at 25k and fatal at 1M happen here. ``json.dumps(books)``
     builds the whole serialized document as one string before writing (GBs), and
-    ``encode([...all texts...])`` holds every text plus the fp32 result. So we write
-    the JSON array incrementally and encode ``chunk`` books at a time into a single
-    preallocated fp16 array. Returns (ids in file order, embeddings).
+    ``encode([...all texts...])`` holds every text plus the fp32 result. So we work in
+    chunks and keep only fp16 vectors.
+
+    Chunks are **checkpointed** to ``work_dir`` (default: beside the output) as a
+    ``.jsonl`` + ``.npy`` pair. Encoding dominates the run -- hours per 100k books on
+    CPU -- so a crash, a reboot, or a closed lid must not cost the whole job: on
+    restart, finished shards are reloaded and only the missing tail is encoded.
+    Re-streaming the source dump to get there costs minutes, which is noise.
+
+    Returns (ids in file order, embeddings).
     """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    work = Path(work_dir) if work_dir else out_path.parent / "_shards"
+    work.mkdir(parents=True, exist_ok=True)
+
+    shards: list[int] = []
+    n_desc = 0
+    pending: list[dict] = []
+    i = 0
+    for rec in records:
+        n_desc += 1 if rec["description"] else 0
+        pending.append(rec)
+        if len(pending) >= chunk:
+            _shard(work, i, pending, encoder)
+            shards.append(i)
+            i += 1
+            pending = []
+    if pending:
+        _shard(work, i, pending, encoder)
+        shards.append(i)
+
+    # Assemble: stream the record shards into the JSON array, stack the vectors.
     ids: list[str] = []
     blocks: list[np.ndarray] = []
-    n_desc = 0
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as fh:
         fh.write("[\n")
         first = True
-        pending: list[dict] = []
-        for rec in records:
-            n_desc += 1 if rec["description"] else 0
-            pending.append(rec)
-            if len(pending) >= chunk:
-                first = _emit(fh, pending, ids, blocks, encoder, first)
-                pending = []
-        if pending:
-            first = _emit(fh, pending, ids, blocks, encoder, first)
+        for s in shards:
+            blocks.append(np.load(work / f"emb_{s:05d}.npy"))
+            for line in (work / f"rec_{s:05d}.jsonl").read_text(encoding="utf-8").splitlines():
+                if not line:
+                    continue
+                fh.write(("" if first else ",\n") + "  " + line)
+                first = False
+                ids.append(json.loads(line)["id"])
         fh.write("\n]\n")
-    print(f"  {len(ids)} books written ({n_desc} with descriptions)")
+
     emb = np.vstack(blocks) if blocks else np.zeros((0, 384), dtype=np.float16)
+    print(f"  {len(ids)} books written ({n_desc} with descriptions), emb {emb.shape}")
     return ids, emb
 
 
-def _emit(fh, recs: list[dict], ids: list[str], blocks: list, encoder, first: bool) -> bool:
-    """Encode one chunk and append it to the open JSON array."""
-    blocks.append(np.asarray(encoder.encode([book_to_text(b) for b in recs]), dtype=np.float16))
-    for b in recs:
-        fh.write(("" if first else ",\n") + "  " + json.dumps(b, ensure_ascii=False))
-        first = False
-        ids.append(b["id"])
-    print(f"    {len(ids)} encoded", flush=True)
-    return first
+def _shard(work: Path, i: int, recs: list[dict], encoder) -> None:
+    """Encode + persist one chunk, unless its shard pair is already on disk."""
+    rec_p, emb_p = work / f"rec_{i:05d}.jsonl", work / f"emb_{i:05d}.npy"
+    if rec_p.exists() and emb_p.exists():
+        print(f"    chunk {i}: resumed from checkpoint", flush=True)
+        return
+    t = time.perf_counter()
+    vecs = np.asarray(encoder.encode([book_to_text(b) for b in recs]), dtype=np.float16)
+    rec_p.write_text(
+        "\n".join(json.dumps(b, ensure_ascii=False) for b in recs) + "\n", encoding="utf-8"
+    )
+    np.save(emb_p, vecs)  # written last: its presence is what marks the chunk done
+    print(f"    chunk {i}: {len(recs)} encoded in {time.perf_counter() - t:.0f}s", flush=True)
 
 
 def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data_dir=DATA):
@@ -315,8 +346,13 @@ def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data
     authors = load_authors(authors_path)
     genres = load_genres(genres_path, keep=keep_raw)
 
-    model = "BAAI/bge-small-en-v1.5"
-    print(f"Pass 2/2 over books: writing records + embedding with {model}...")
+    # Same encoder choice as build_embeddings.py: the co-read fine-tuned bge-small
+    # when it's built, else stock. Using a different one here would make the new
+    # catalog incomparable to the existing eval baselines.
+    coread = ROOT / "data" / "coread-encoder"
+    model = str(coread) if coread.exists() else "BAAI/bge-small-en-v1.5"
+    label = "coread-finetuned bge-small" if coread.exists() else model
+    print(f"Pass 2/2 over books: writing records + embedding with {label}...")
     order, emb = write_books_and_embed(
         data_dir / "real_books.json",
         iter_records(books_path, keep_raw, authors, genres),
@@ -343,7 +379,7 @@ def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data
         data_dir / "real_embeddings.npz",
         ids=np.array(order, dtype=str),
         emb=emb,
-        model=np.array(model),
+        model=np.array(label),
     )
     save_cf(data_dir / "real_cf.npz", order, sim, pop)
     print(
@@ -359,8 +395,15 @@ def main() -> None:
     ap.add_argument("--genres", type=Path)
     ap.add_argument("--authors", type=Path)
     ap.add_argument("--top-n", type=int, default=25000)
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=DATA,
+        help="output dir (default: data/). Point a large ingest somewhere else -- it "
+        "overwrites real_books/embeddings/cf, i.e. the catalog the evals baseline against.",
+    )
     args = ap.parse_args()
-    ingest(args.books, args.interactions, args.genres, args.authors, args.top_n)
+    ingest(args.books, args.interactions, args.genres, args.authors, args.top_n, args.out)
 
 
 if __name__ == "__main__":
