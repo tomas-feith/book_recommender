@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import heapq
 import json
 import sys
@@ -52,17 +53,49 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from hygiene import guess_language, norm_title  # noqa: E402
+
 from eval.data import book_to_text  # noqa: E402
 
 DATA = ROOT / "data"
 
-LANG_MAP = {"eng": "en", "en-US": "en", "en-GB": "en", "en-CA": "en", "": "en"}
+# Goodreads mixes ISO 639-1 ("nl") and 639-2 ("dut") in the same field, so the
+# language filter silently misses books unless we normalize to one alphabet.
+_ISO2 = dict(
+    p.split(":")
+    for p in (
+        "eng:en spa:es fre:fr fra:fr ger:de deu:de ita:it por:pt dut:nl nld:nl "
+        "rus:ru jpn:ja chi:zh zho:zh kor:ko ara:ar heb:he gre:el ell:el pol:pl "
+        "swe:sv dan:da nor:no fin:fi tur:tr cze:cs ces:cs hun:hu ind:id vie:vi "
+        "tha:th hin:hi ukr:uk ron:ro rum:ro cat:ca lat:la per:fa fas:fa"
+    ).split()
+)
+
+
+def norm_language(code: str, title: str = "") -> str:
+    """Normalize Goodreads' ``language_code`` to a 2-letter ISO 639-1 code.
+
+    Handles regional tags ("en-US"), 639-2 codes ("spa"), and blanks -- an empty
+    code falls back to the script of the title, which is how a non-Latin book
+    avoids being stamped English.
+    """
+    c = (code or "").strip().lower().replace("_", "-")
+    if not c:
+        return guess_language(title)
+    base = c.split("-")[0]
+    if len(base) == 2:
+        return base
+    return _ISO2.get(base, guess_language(title))
+
 
 # Swipe/rating scale is 1-5; UCSD ratings are already 0-5 (0 == no rating).
 MIN_RATED_PER_USER = 3  # users with too little signal add noise to CF
 MAX_USERS = 200_000  # cap CF training users to bound memory
 MAX_INTERACTIONS = 120_000_000  # ~1 GB of int32 CSR coordinates; the real RAM ceiling
 EMB_CHUNK = 20_000  # books encoded (and written) per chunk, so texts never all resident
+# EASE inverts an h*h float64 Gram and numpy returns the inverse as a second array,
+# so peak is ~16*h^2 bytes: 20k -> 6.4 GB, cf_build's own 30k default -> 14.4 GB.
+EASE_MAX_ITEMS = 20_000
 
 
 def stream_jsonl_gz(path: Path) -> Iterable[dict]:
@@ -108,25 +141,57 @@ def _to_int(x, default=0) -> int:
         return default
 
 
-def select_top_book_ids(books_path: Path, top_n: int) -> set[str]:
-    """Stream the books file, return the ids of the ``top_n`` most-rated books.
+def _dedup_digest(title: str, author: str) -> bytes | None:
+    """Stable 8-byte key for (normalized title, first author), or None if unusable.
+
+    Hashed rather than stored: the full string tuple over 2.4M books is ~600 MB of
+    Python objects, and the digest is reproducible across runs (unlike ``hash()``,
+    which is salted per process). 64 bits over a few million keys collides with
+    probability ~1e-7, and a collision costs one dropped edition.
+    """
+    t, a = norm_title(title), norm_title((author or "").split(",")[0])
+    if not (t and a):  # precision-first: can't confirm a dup without both
+        return None
+    return hashlib.blake2b(f"{t}\x00{a}".encode(), digest_size=8).digest()
+
+
+def select_top_book_ids(books_path: Path, top_n: int, authors: dict[str, str]) -> set[str]:
+    """Stream the books file; return ids of the ``top_n`` most-rated **distinct** works.
 
     **Ids only, deliberately.** Holding the raw records in the heap costs several KB
     each (Goodreads ships ``popular_shelves`` with ~100 entries per book), so at
     ``top_n`` = 1M that heap alone is multiple GB. Ids are ~100 bytes; the caller
     re-streams the file and converts only the winners to slim records.
+
+    Dedup happens **here**, not after selection. Goodreads lists a work once per
+    edition, each with its own ratings -- ~3% of the head, concentrated in exactly the
+    popular titles CF surfaces -- and ``hygiene.dedup_records`` needs the whole corpus
+    resident, which is what this pass exists to avoid. Keeping the most-rated edition
+    per key matches ``hygiene._completeness`` (ratings first) and is the right pick for
+    a ratings source: it is both the canonical edition and the one carrying CF signal.
     """
-    heap: list[tuple[int, str]] = []  # min-heap on ratings_count
+    best: dict[bytes, tuple[int, str]] = {}  # dedup digest -> (ratings_count, id)
+    loose: list[tuple[int, str]] = []  # no confirmable key -> never merged
+    n_seen = 0
     for i, raw in enumerate(stream_jsonl_gz(books_path)):
-        if not raw.get("title"):
+        title = raw.get("title")
+        if not title:
             continue
+        n_seen += 1
         rc = _to_int(raw.get("ratings_count"))
         bid = str(raw.get("book_id", i))
-        if len(heap) < top_n:
-            heapq.heappush(heap, (rc, bid))
-        elif rc > heap[0][0]:
-            heapq.heapreplace(heap, (rc, bid))
-    return {bid for _, bid in heap}
+        names = [authors.get(str(a.get("author_id")), "") for a in raw.get("authors", [])]
+        d = _dedup_digest(title, next((n for n in names if n), ""))
+        if d is None:
+            loose.append((rc, bid))
+        elif rc > best.get(d, (-1, ""))[0]:
+            best[d] = (rc, bid)
+    cand = list(best.values()) + loose
+    print(
+        f"  {n_seen} titled works -> {len(cand)} distinct "
+        f"({n_seen - len(cand)} duplicate editions dropped, {len(loose)} unattributed)"
+    )
+    return {bid for _, bid in heapq.nlargest(top_n, cand)}
 
 
 def iter_records(
@@ -154,7 +219,7 @@ def to_record(raw: dict, authors: dict[str, str], genres: dict[str, list[str]]) 
         "title": raw.get("title", ""),
         "author": ", ".join(author_names),
         "subjects": subs,
-        "language": LANG_MAP.get(raw.get("language_code", ""), raw.get("language_code") or "en"),
+        "language": norm_language(raw.get("language_code", ""), raw.get("title", "")),
         "year": year,
         "image": raw.get("image_url", ""),
         "description": (raw.get("description") or "").strip()[:800],
@@ -334,16 +399,24 @@ def _shard(work: Path, i: int, recs: list[dict], encoder) -> None:
     print(f"    chunk {i}: {len(recs)} encoded in {time.perf_counter() - t:.0f}s", flush=True)
 
 
-def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data_dir=DATA):
+def ingest(
+    books_path,
+    interactions_path,
+    genres_path,
+    authors_path,
+    top_n,
+    data_dir=DATA,
+    max_items=EASE_MAX_ITEMS,
+):
     from cf_build import ease_from_X
 
     from app.store import save_cf
     from eval.embedders import SentenceTransformerEmbedder
 
-    print(f"Pass 1/2 over books: selecting top {top_n} by rating count...")
-    keep_raw = select_top_book_ids(books_path, top_n)
+    authors = load_authors(authors_path)  # needed by the dedup key, so load first
+    print(f"Pass 1/2 over books: selecting top {top_n} distinct works by rating count...")
+    keep_raw = select_top_book_ids(books_path, top_n, authors)
     print(f"  {len(keep_raw)} selected")
-    authors = load_authors(authors_path)
     genres = load_genres(genres_path, keep=keep_raw)
 
     # Same encoder choice as build_embeddings.py: the co-read fine-tuned bge-small
@@ -372,8 +445,13 @@ def ingest(books_path, interactions_path, genres_path, authors_path, top_n, data
     X, pop = build_user_item(interactions_path, col_of, user_row, len(order))
     print(f"  X = {X.shape[0]}x{X.shape[1]}, {X.nnz} interactions")
 
-    print("Solving EASE over the warm head...")
-    sim, pop = ease_from_X(X, pop)
+    # EASE peaks at ~16*h^2 bytes: the h*h float64 Gram plus the inverse numpy
+    # returns as a second array. 30k -> 14.4 GB, which OOMs a 10 GB box; 20k -> 6.4 GB.
+    n_warm = int((pop > 0).sum())
+    h = min(n_warm, max_items)
+    print(f"Solving EASE over the warm head: {n_warm} warm, cap {max_items} -> h={h}")
+    print(f"  peak ~{16 * h * h / 1e9:.1f} GB for the Gram + inverse")
+    sim, pop = ease_from_X(X, pop, max_items=max_items)
 
     np.savez_compressed(
         data_dir / "real_embeddings.npz",
@@ -402,8 +480,23 @@ def main() -> None:
         help="output dir (default: data/). Point a large ingest somewhere else -- it "
         "overwrites real_books/embeddings/cf, i.e. the catalog the evals baseline against.",
     )
+    ap.add_argument(
+        "--max-items",
+        type=int,
+        default=EASE_MAX_ITEMS,
+        help=f"warm items EASE solves over (default {EASE_MAX_ITEMS}). Peak RAM is "
+        "~16*h^2 bytes, so raising this is what OOMs the build.",
+    )
     args = ap.parse_args()
-    ingest(args.books, args.interactions, args.genres, args.authors, args.top_n, args.out)
+    ingest(
+        args.books,
+        args.interactions,
+        args.genres,
+        args.authors,
+        args.top_n,
+        args.out,
+        args.max_items,
+    )
 
 
 if __name__ == "__main__":

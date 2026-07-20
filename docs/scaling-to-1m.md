@@ -365,6 +365,15 @@ cached under the gitignored `.cache/goodreads/`):
 | `goodreads_book_genres_initial.json.gz` | 0.02 GB | better genres than `popular_shelves` |
 | `goodreads_book_authors.json.gz` | 0.02 GB | author names (829,529) |
 
+**The corpus is smaller than the headline number.** Measured over the full dump:
+2,360,648 titled works collapse to **1,769,710 distinct works** — 590,938 (25.0%)
+are duplicate *editions* of a work already present, each carrying its own ratings.
+So the usable ceiling is ~1.77M, not 2.3M. At 250k we take the top 14% by ratings;
+a 1M target would take **57% of every distinct work in the dataset**, reaching deep
+into books with near-zero ratings and often no description — which is a content-quality
+question (§F description coverage), not just a CF-coldness one. Worth re-checking
+before treating 1M as a fixed goal.
+
 ### G1. The adapter was written for 25k and had three linear-in-N blowups
 
 > **✅ Fixed.** All three, validated on the real dump and the real goodbooks ratings.
@@ -381,6 +390,30 @@ string → now written incrementally from shards.
 *Validated:* the streamed matrix is identical to the dict-built one (X equal, pop
 equal) and EASE through both entry points matches bit-for-bit (`max|Δ| = 0.000e+00`)
 on the real goodbooks ratings (5,976,479 ratings / 53,424 users).
+
+### G1b. The Goodreads adapter never ran the hygiene pass
+
+> **✅ Fixed.** `scripts/hygiene.py` was wired into `ingest_openlibrary_dump` and
+> `add_books` in Phase 1 — but **not** into the Goodreads adapter, which is the one we
+> actually ingest from.
+
+Two consequences, both measured on the real dump:
+
+- **Duplicate editions.** 25% corpus-wide, and 3.4% of the *top* 2000 by ratings
+  ("Gone Girl" ×4, "Divergent" ×3) — concentrated in exactly the popular head that CF
+  surfaces, so result lists would repeat titles. Dedup now happens **inside** the
+  streaming selection (`select_top_book_ids`), not via `hygiene.dedup_records`, which
+  needs the whole corpus resident — the thing §G1 exists to avoid. Keeping the
+  most-rated edition per (normalized title, first author) matches
+  `hygiene._completeness` (ratings first) and, for a ratings source, is both the
+  canonical edition and the one carrying the CF signal. After: 0 dup groups remain.
+- **Mixed ISO alphabets.** Goodreads puts 639-1 (`nl`) and 639-2 (`dut`) in the same
+  field, so the language filter silently missed books — filtering `es` matched nothing
+  because Spanish books were tagged `spa`. `norm_language` unifies to 639-1 and falls
+  back to the title's Unicode script when the field is blank.
+
+*(The subject-vocabulary explosion §F warns about does **not** occur on this source:
+the UCSD genres file gives exactly 10 canonical buckets, not raw shelves.)*
 
 ### G2. Encoding is the real ceiling, and it is hardware
 
