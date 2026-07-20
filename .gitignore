@@ -48,3 +48,6 @@ data/*
 .coverage
 coverage.xml
 htmlcov/
+
+# Large-catalog ingests (scripts/ingest_goodreads_ucsd.py --out)
+data_*/

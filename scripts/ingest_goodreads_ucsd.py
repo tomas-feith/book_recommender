@@ -131,6 +131,11 @@ EMB_CHUNK = 20_000  # books encoded (and written) per chunk, so texts never all 
 # EASE inverts an h*h float64 Gram and numpy returns the inverse as a second array,
 # so peak is ~16*h^2 bytes: 20k -> 6.4 GB, cf_build's own 30k default -> 14.4 GB.
 EASE_MAX_ITEMS = 20_000
+# Eval-profile selection, mirroring build_real_dataset.py: focused, moderate readers,
+# not omnivores who rated a huge share of the catalog.
+PROF_MIN_RATED, PROF_MAX_RATED = 10, 40
+PROF_MIN_LIKES, PROF_MAX_LIKES = 6, 25
+PROF_MAX_USERS = 120
 
 
 def stream_jsonl_gz(path: Path) -> Iterable[dict]:
@@ -302,16 +307,21 @@ def count_ratings_per_user(path: Path, keep: set[str]) -> dict[str, int]:
 
 
 def choose_users(
-    counts: dict[str, int], max_users: int = MAX_USERS, max_interactions: int = MAX_INTERACTIONS
+    counts: dict[str, int],
+    max_users: int = MAX_USERS,
+    max_interactions: int = MAX_INTERACTIONS,
+    exclude: set[str] | None = None,
 ) -> dict[str, int]:
     """Pick the CF training users -> {user_id: row}, under both caps.
 
     Most-active users first (densest Gram per row kept), dropping anyone below
     ``MIN_RATED_PER_USER``, and stopping once the interaction budget is spent so the
     CSR stays within RAM. Ties break on user id so the build is reproducible.
+    ``exclude`` holds out the evaluation-profile users so CF never trains on them.
     """
+    skip = exclude or set()
     eligible = sorted(
-        ((u, c) for u, c in counts.items() if c >= MIN_RATED_PER_USER),
+        ((u, c) for u, c in counts.items() if c >= MIN_RATED_PER_USER and u not in skip),
         key=lambda kv: (-kv[1], kv[0]),
     )
     chosen: dict[str, int] = {}
@@ -324,23 +334,53 @@ def choose_users(
     return chosen
 
 
+def pick_eval_users(counts: dict[str, int]) -> set[str]:
+    """Users held out to become evaluation profiles -- never used for CF training.
+
+    Mirrors ``build_real_dataset.build_profiles``: moderate, focused readers. Selected
+    from the pass-1 counts so the choice is made before any CF matrix is built, which
+    is what keeps the split honest -- ``choose_users`` then excludes them, so EASE
+    never sees a held-out user's ratings.
+    """
+    eligible = sorted(u for u, c in counts.items() if PROF_MIN_RATED <= c <= PROF_MAX_RATED)
+    return set(eligible[:PROF_MAX_USERS])
+
+
 def build_user_item(
-    path: Path, col_of: dict[str, int], user_row: dict[str, int], n_items: int
-) -> tuple[sparse.csr_matrix, np.ndarray]:
+    path: Path,
+    col_of: dict[str, int],
+    user_row: dict[str, int],
+    n_items: int,
+    eval_users: set[str] | None = None,
+) -> tuple[sparse.csr_matrix, np.ndarray, dict[str, dict[str, int]]]:
     """Pass 2: stream interactions straight into a binary users×items CSR.
 
     Rows/cols accumulate in ``array('i')`` (4 raw bytes each, no Python int objects),
     which is what keeps a 100M-interaction build inside a few hundred MB instead of
     the tens of GB the dict-of-dicts form would need.
+
+    Also harvests the raw ratings of ``eval_users`` on the way past -- they are excluded
+    from ``user_row``, so this is the only chance to see them without a third pass over
+    a 10.7 GB file. Bounded by design (~120 users x <=40 ratings), and rating *values*
+    are kept here because profiles need like/dislike, unlike the binarized CF matrix.
     """
+    evals = eval_users or set()
+    eval_ratings: dict[str, dict[str, int]] = defaultdict(dict)
     rows, cols = array("i"), array("i")
     for row in stream_jsonl_gz(path):
-        if _to_int(row.get("rating")) < 1:
+        rating = _to_int(row.get("rating"))
+        if rating < 1:
             continue
-        ui = user_row.get(str(row["user_id"]))
+        uid = str(row["user_id"])
+        bid = "gr:" + str(row.get("book_id"))
+        if uid in evals:
+            if bid in col_of:
+                eval_ratings[uid][bid] = rating
+            continue  # held out: never enters the CF matrix
+        ui = user_row.get(uid)
         if ui is None:
             continue
-        j = col_of.get("gr:" + str(row.get("book_id")))
+        j = col_of.get(bid)
         if j is not None:
             rows.append(ui)
             cols.append(j)
@@ -354,7 +394,24 @@ def build_user_item(
     X.sum_duplicates()
     X.data[:] = 1.0  # binarize: EASE uses implicit co-occurrence, not rating value
     pop = np.asarray(X.sum(axis=0)).ravel().astype(np.float32)
-    return X, pop
+    return X, pop, dict(eval_ratings)
+
+
+def to_profiles(eval_ratings: dict[str, dict[str, int]]) -> list[dict]:
+    """Held-out ratings -> eval profiles, same shape as ``data/real_profiles.json``.
+
+    Likes are >= 4 and dislikes <= 2, matching ``build_real_dataset``. Users whose
+    positive signal is too thin (or implausibly broad) are dropped, and the result is
+    sorted to prefer users who also gave dislikes -- richer signal for the Rocchio arm.
+    """
+    profiles = []
+    for uid, ratings in eval_ratings.items():
+        likes = [b for b, s in ratings.items() if s >= 4]
+        dislikes = [b for b, s in ratings.items() if s <= 2]
+        if PROF_MIN_LIKES <= len(likes) <= PROF_MAX_LIKES:
+            profiles.append({"user": f"gr_{uid}", "likes": likes, "dislikes": dislikes})
+    profiles.sort(key=lambda p: (len(p["dislikes"]) > 0, p["user"]), reverse=True)
+    return profiles
 
 
 # ---- driver ------------------------------------------------------------------
@@ -472,13 +529,22 @@ def ingest(
 
     print("Pass 1/2 over interactions: counting per user...")
     counts = count_ratings_per_user(interactions_path, keep)
-    user_row = choose_users(counts)
-    print(f"  {len(counts)} users seen -> {len(user_row)} kept")
+    eval_users = pick_eval_users(counts)
+    user_row = choose_users(counts, exclude=eval_users)
+    print(f"  {len(counts)} users seen -> {len(user_row)} for CF, {len(eval_users)} held out")
     del counts
 
     print("Pass 2/2 over interactions: building the user-item matrix...")
-    X, pop = build_user_item(interactions_path, col_of, user_row, len(order))
+    X, pop, eval_ratings = build_user_item(
+        interactions_path, col_of, user_row, len(order), eval_users
+    )
     print(f"  X = {X.shape[0]}x{X.shape[1]}, {X.nnz} interactions")
+
+    profiles = to_profiles(eval_ratings)
+    (data_dir / "real_profiles.json").write_text(json.dumps(profiles, indent=2), encoding="utf-8")
+    n_dis = sum(1 for p in profiles if p["dislikes"])
+    avg = sum(len(p["likes"]) for p in profiles) / max(len(profiles), 1)
+    print(f"  {len(profiles)} eval profiles ({n_dis} with dislikes, avg {avg:.1f} likes)")
 
     # EASE peaks at ~16*h^2 bytes: the h*h float64 Gram plus the inverse numpy
     # returns as a second array. 30k -> 14.4 GB, which OOMs a 10 GB box; 20k -> 6.4 GB.

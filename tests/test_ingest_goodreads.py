@@ -14,7 +14,9 @@ from ingest_goodreads_ucsd import (
     build_user_item,
     choose_users,
     norm_language,
+    pick_eval_users,
     select_top_book_ids,
+    to_profiles,
 )
 
 
@@ -137,7 +139,44 @@ def test_build_user_item_is_binary_and_ignores_unknowns(tmp_path):
         ],
     )
     col_of = {"gr:1": 0, "gr:2": 1}
-    X, pop = build_user_item(inter, col_of, {"u1": 0, "u2": 1}, n_items=2)
+    X, pop, _ = build_user_item(inter, col_of, {"u1": 0, "u2": 1}, n_items=2)
     assert X.shape == (2, 2)
     assert set(X.data) == {1.0}  # binarized despite the duplicate
     assert pop.tolist() == [1.0, 1.0]
+
+
+def test_eval_users_are_held_out_of_cf(tmp_path):
+    # A held-out user's ratings must never reach the CF matrix -- otherwise the eval
+    # scores a recommender that already saw the answers.
+    inter = _write_interactions(
+        tmp_path,
+        [
+            {"user_id": "train", "book_id": "1", "rating": 5},
+            {"user_id": "held", "book_id": "1", "rating": 5},
+            {"user_id": "held", "book_id": "2", "rating": 1},
+        ],
+    )
+    col_of = {"gr:1": 0, "gr:2": 1}
+    X, pop, ev = build_user_item(inter, col_of, {"train": 0}, n_items=2, eval_users={"held"})
+    assert X.nnz == 1 and pop.tolist() == [1.0, 0.0]  # only the training user counted
+    assert ev == {"held": {"gr:1": 5, "gr:2": 1}}  # ...but their ratings were harvested
+
+
+def test_choose_users_excludes_eval_users():
+    counts = {"u1": 100, "u2": 50, "u3": 10}
+    assert set(choose_users(counts, exclude={"u1"})) == {"u2", "u3"}
+
+
+def test_pick_eval_users_wants_moderate_readers():
+    counts = {"omnivore": 5000, "moderate": 20, "barely": 2}
+    assert pick_eval_users(counts) == {"moderate"}
+
+
+def test_to_profiles_splits_likes_and_dislikes():
+    ratings = {"u": {f"gr:{i}": 5 for i in range(8)} | {"gr:90": 1, "gr:91": 2}}
+    (prof,) = to_profiles(ratings)
+    assert prof["user"] == "gr_u"
+    assert len(prof["likes"]) == 8
+    assert sorted(prof["dislikes"]) == ["gr:90", "gr:91"]
+    # too little positive signal to build a profile AND hold books out
+    assert to_profiles({"thin": {"gr:1": 5, "gr:2": 5}}) == []

@@ -121,10 +121,30 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=10, help="eval@K")
     ap.add_argument("--seeds", type=int, default=5, help="random hold-out splits per user")
     ap.add_argument("--seed", type=int, default=42, help="cold-mask seed")
+    ap.add_argument(
+        "--data",
+        type=Path,
+        default=DATA,
+        help="catalog dir to evaluate (default: data/). Point at a large ingest to "
+        "measure it without swapping it into the serving catalog.",
+    )
+    ap.add_argument(
+        "--profiles",
+        type=Path,
+        default=None,
+        help="profiles JSON (default: <data>/real_profiles.json, else data/real_profiles.json)",
+    )
     args = ap.parse_args()
 
-    cat = Catalog.load(DATA)
-    profiles = load_profiles(DATA / "real_profiles.json")
+    cat = Catalog.load(args.data)
+    # A freshly-ingested catalog has no profiles of its own; fall back to the base
+    # ones. They only supply (book id -> like) pairs, and ids not present are skipped.
+    prof_path = args.profiles or (
+        args.data / "real_profiles.json"
+        if (args.data / "real_profiles.json").exists()
+        else DATA / "real_profiles.json"
+    )
+    profiles = load_profiles(prof_path)
     rng = np.random.default_rng(args.seed)
     cold = np.zeros(len(cat), dtype=bool)
     cold[rng.choice(len(cat), size=int(len(cat) * args.cold_frac), replace=False)] = True
