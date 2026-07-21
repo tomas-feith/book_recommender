@@ -23,6 +23,8 @@ constants and the "+35% EASE" win were all tuned at 10k and may not transfer.
 | 5 | Full-scan scoring per request (no ANN) | ~200k–500k books | Inference (§C) | Latency + memory churn | ✅ Fixed (Phase 1, FAISS) |
 | 6 | Tuning constants & the "+35%" claim don't transfer | any | Eval validity (§E) | Silent quality loss | 🚧 Phase 2 started (`eval/served_eval`) |
 | 6b | Convex CF/content blend made cold books unreachable | any cold-heavy catalog | Ranking (§E1) | Fatal for the tail | ✅ Fixed (additive blend) |
+| 6c | CF reached 10% of the catalog (dense-EASE budget) | >10k items | Algorithm (§B1) | Tail unreachable | ✅ Fixed (EASE/iALS hybrid) |
+| 6d | Head and tail compete for the same N slots | any large catalog | Ranking (§E3) | Tail crowded out | ✅ Mitigated (reserved slots) |
 | 7 | Dedup / language / selection hygiene | any large ingest | Data source (§F) | Quality | ✅ Fixed (dedup/lang/selection); subjects/coverage remain |
 | 8 | Ingest adapter holds raw records + interactions in RAM | ~100k books / ~50M interactions | Data source (§G1) | Fatal (OOM at ingest) | ✅ Fixed (streamed) |
 | 9 | Encoding throughput — 4.4 books/s on this CPU | any large ingest | Ingest compute (§G2) | ~63 h for 1M locally | ⚠️ Hardware; checkpointed, GPU for 1M |
@@ -134,6 +136,17 @@ CSR forces an expensive gather / format conversion. Cheap at 22k, painful at 1M.
 ---
 
 ## B. Algorithm scaling — model training
+
+> **✅ Resolved (2026-07-21) — `cf_build.hybrid_cf`.** EASE rows for the popular head,
+> **iALS** rows for everything else. iALS is O(nnz·k² + N·k³) time and O(N·k) memory, so
+> it never forms an item×item matrix and covers the whole catalog: at 100k that is
+> 99,996 items against EASE's 10,000. Neither builder wins alone (EASE head/tail
+> 0.242/0.008, iALS 0.169/0.104) — EASE is the better model where its solve fits, iALS
+> is the only one that reaches the rest. Blocks are row-normalized before merging
+> (EASE weights average 0.021, iALS cosines 0.898 — a 43× gap). Tuned to `alpha=40`
+> (§E3). The dense-EASE budget itself is now measured, not assumed: 10k, because a
+> nominally 10 GB box shows only ~3–5 GB available and h=20000 paged before its inverse
+> even began.
 
 ### B1. EASE-R is a hard wall
 
@@ -407,6 +420,44 @@ trusting any of these numbers; re-tune the constants; re-validate the encoder ch
 add tail/coverage metrics. Treat the README's evidence tables as **10k-scoped** until
 re-measured.
 
+### E3. What moved the tail, and what didn't — the one transferable result
+
+Working the 100k catalog end to end produced a sharp asymmetry, and it is more useful
+than any single number below. **Every change that helped was about how signals are
+combined or allocated. Every change that failed was about making one component
+stronger** — and several of the failures were confirmed real effects in their own
+intermediate metric, which is exactly why they were convincing.
+
+| lever | intermediate metric | end-to-end effect |
+|---|---|---|
+| ✅ Additive blend + sparse standardization (§E1) | — | cold 0.000 → 0.017, warm *up* too |
+| ✅ `cf_weight` gated on having a CF row | — | prevented a −1.8σ penalty on 90% of the catalog |
+| ✅ iALS coverage (§B1) | 10% → 100% of items covered | tail 0.040 → 0.070 |
+| ✅ Reserved tail slots | — | tail 0.088 → 0.108 at 20% reservation |
+| ✅ iALS `alpha` 10 → 40 | isolated tail R@10 +7.5% | tail +1.4…5.6% (2–3× smaller in situ) |
+| ❌ ANN `nprobe` 48 → 128 | retrieved recall@10 0.912 → **0.988** | **+0.001** |
+| ❌ ANN retrieval depth 2k → 20k | none — identical | none |
+| ❌ iALS factors 64 → 128 | — | +0.004 exact, −0.003 faiss |
+| ❌ Better encoder for the tail | — | content is *better* on tail (0.097 vs 0.078) |
+| ❌ Weighted-λ regularization | imbalance 17× → **1.5×** | best 0.3300 vs 0.3317 |
+
+Three habits this argues for:
+
+1. **Measure the outcome, not the mechanism.** `nprobe` and weighted-λ both fixed
+   genuine, measurable defects and changed nothing that matters.
+2. **Isolated sweeps overstate.** The `alpha` sweep measured CF-only ranking in a
+   tail-only pool and predicted +7.5%; the served path gave +1.4…5.6%. Crowding
+   compresses differences that a clean pool exaggerates — budget a 2–3× haircut.
+3. **Watch for the experiment that didn't run.** A `tail_frac` A/B returned
+   byte-identical numbers, which read as "no effect" but meant the parameter was
+   shadowed by a Python default bound at import. Identical-to-the-last-digit results
+   across a changed condition mean the change did not apply.
+
+**Still unresolved:** iALS `reg` is inert from 0.1 to 100, `reg=100` *may* be slightly
+better (0.3317 vs 0.3250), but the seed was never varied and adjacent configs wiggle by
+up to 0.015 — so that is noise-vs-signal, and settling it needs repeated seeds rather
+than a wider grid.
+
 ---
 
 ## F. Data source & hygiene
@@ -561,11 +612,25 @@ the 4 physical cores). **Consequences:**
 5. Title/author search → trigram/FTS (C4).
 6. Dedup + real language + ranked selection at ingest (F).
 
-**Phase 2 — prove it's actually good:**
+**Phase 2 — prove it's actually good:** ✅ *largely done at 100k (2026-07-20/21)*
 
-7. Stratified 1M eval with cold-tail/coverage metrics; re-tune constants; re-validate
-   the encoder (E).
-8. Split read-serving from the write path (D).
+7. ✅ Stratified eval on a real 100k catalog (`served_eval --split poprank|natural`,
+   `--assemble`). Constants re-tuned where it paid (`alpha`), left alone where it did
+   not (`reg`, `nprobe`, factors). Encoder **re-validated and exonerated**: content
+   ranking is *better* on the tail than the head, so the encoder was never the
+   constraint — see §E3.
+8. Split read-serving from the write path (D). *Still open.*
+
+**Phase 3 — what actually blocks 1M now:**
+
+9. **Encoding throughput.** Everything downstream scales; the encoder does not. At the
+   measured ~4.9 books/s a 1M ingest is ~57 h locally, so full scale is a GPU job. The
+   shard layout (§G2) is already the portable unit of work for that.
+10. **`surprise()` is still a full scan** — 2.3 s at 250k, ~9 s at 1M. Its whole-catalog
+    quantile gate is intrinsic to its semantics, so it needs a sampled quantile rather
+    than a retrieval fix.
+11. **Coverage is ~2%** even after the tail work. Reserved slots move it to ~2.4%; the
+    long tail is reachable but still largely unreached.
 
 **First three concrete moves:** the genre-mask inverted index (a low-risk drop-in
 `Catalog` change), an ANN retrieve-then-rerank wrapper around `Recommender._scores`
