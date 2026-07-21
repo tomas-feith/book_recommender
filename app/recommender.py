@@ -52,6 +52,11 @@ CAL_SMOOTH = 0.01  # KL smoothing so an absent list-genre doesn't blow up
 # alone -- it has to be allocated. 2 of 10 slots by default.
 HEAD_FRAC = 0.1
 TAIL_SLOTS_FRAC = 0.2
+# "Surprise me" scores this many candidates instead of the whole catalog. The gate is a
+# score quantile, which a uniform sample estimates fine, so this bounds a call that was
+# 2.3 s at 250k and ~9 s at 1M. Large enough that the top-quantile slice still holds
+# thousands of books to rank by novelty.
+SURPRISE_SAMPLE = 20_000
 
 
 def _standardize(x: np.ndarray) -> np.ndarray:
@@ -404,6 +409,7 @@ class Recommender:
         n: int = 10,
         relevance_quantile: float = 0.75,
         per_author: int = 2,
+        rng: random.Random | None = None,
     ) -> list[Scored]:
         """Serendipity: books UNLIKE your taste that still score strongly.
 
@@ -416,17 +422,28 @@ class Recommender:
         nothing like your usual reads."
 
         Needs positive signal to define "your taste"; returns [] for cold users.
+
+        **Sampled, not exhaustive.** ANN retrieval cannot serve this -- it finds books
+        NEAR the taste vector and surprise wants far ones -- so this used to scan the
+        whole catalog, which reached 2.3 s at 250k and would be ~9 s at 1M. But the gate
+        is a *quantile* of the score distribution, and a uniform sample estimates a
+        quantile perfectly well; novelty ranking likewise needs novel books, not the
+        global argmax. So we score a sample of ``SURPRISE_SAMPLE`` candidates and gate
+        within it, making the cost independent of catalog size. Pass ``rng`` to make the
+        sample deterministic; by default each call draws fresh, which suits a
+        "Surprise me" button.
         """
         liked, disliked, interested = self._split(reactions)
         pos = liked + interested
         if not pos:
             return []
-        # Full scan on purpose: surprise gates on the whole-catalog score quantile and
-        # ranks by novelty, so a retrieved candidate subset would move the reference.
-        # It's the occasional "Surprise me" tab, not the hot swipe path (see §C notes).
         cand = np.where(self._candidate_mask(reactions, filters))[0]
         if len(cand) == 0:
             return []
+        if len(cand) > SURPRISE_SAMPLE:
+            rng = rng or random.Random()
+            picked = rng.sample(range(len(cand)), SURPRISE_SAMPLE)
+            cand = cand[np.sort(np.fromiter(picked, dtype=np.int64, count=SURPRISE_SAMPLE))]
 
         rel = self._scores(liked, disliked, interested, cand)
         # Gate: keep only strongly-recommended candidates.

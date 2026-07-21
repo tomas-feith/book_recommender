@@ -105,6 +105,21 @@ def rebuild_cf(data_dir: Path = DATA, max_items: int | None = None) -> None:
 
     max_items = EASE_MAX_ITEMS if max_items is None else max_items
 
+    # Guard: this path learns CF from the *goodbooks* ratings dump, whose ids only match
+    # a goodbooks-derived catalog. Against a Goodreads ingest (``gr:`` ids) nothing joins,
+    # and the rebuild would quietly replace a 5M-interaction CF matrix with one learned
+    # from a few hundred app swipes -- a catastrophic downgrade that looks like success.
+    # Large catalogs rebuild CF with scripts/rebuild_cf.py instead, off the cached
+    # interaction matrix.
+    order_probe = _catalog_order()
+    if order_probe and not any(b[:1].isdigit() for b in order_probe[:100]):
+        raise SystemExit(
+            "refresh --rebuild-cf only understands goodbooks ids, but this catalog uses "
+            f"ids like {order_probe[0]!r}. Use:\n"
+            "  uv run --no-sync python scripts/rebuild_cf.py --data data --method hybrid\n"
+            "(or pass --no-cf to skip the CF rebuild)."
+        )
+
     order = _catalog_order()
     order_set = set(order)
 

@@ -51,3 +51,6 @@ htmlcov/
 
 # Large-catalog ingests (scripts/ingest_goodreads_ucsd.py --out)
 data_*/
+
+# Catalog promotion backups (scripts/promote_catalog.py)
+data_backup_*/
