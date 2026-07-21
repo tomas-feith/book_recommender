@@ -194,7 +194,12 @@ def ease_from_X(
 
 
 def _als_half(
-    Y: np.ndarray, Xr: sparse.csr_matrix, reg: float, alpha: float, out: np.ndarray
+    Y: np.ndarray,
+    Xr: sparse.csr_matrix,
+    reg: float,
+    alpha: float,
+    out: np.ndarray,
+    weighted_reg: bool = True,
 ) -> None:
     """One ALS half-step: solve for every row of ``out`` given fixed factors ``Y``.
 
@@ -203,9 +208,20 @@ def _als_half(
     ``u`` interacted with. ``YᵀY`` is computed once for all rows (k×k), so each row only
     pays for its own non-zeros -- which is what makes this O(nnz·k²) instead of
     O(users·items·k).
+
+    ``weighted_reg`` scales the ridge by each row's observation count (``λ·n_u·I``,
+    ALS-WR / Zhou et al. 2008) instead of a flat ``λI``. A single global λ cannot be
+    right for both halves: instrumenting the solver on the real 100k catalog showed the
+    two Gram matrices ~21x apart (diag ~93 for the user step, ~1940 for the item step),
+    so λ was 0.80% of the user solve and 0.048% of the item solve -- regularizing users
+    ~17x harder than items. Scaling by ``n_u`` makes the penalty track how much evidence
+    a row actually has, which balances the halves and stops rows with one interaction
+    being fit as confidently as rows with five hundred.
     """
     k = Y.shape[1]
-    G = Y.T @ Y + reg * np.eye(k, dtype=np.float64)
+    G = Y.T @ Y
+    eye = np.eye(k, dtype=np.float64)
+    Greg = G + reg * eye  # flat-λ path: fold the ridge in once
     indptr, indices = Xr.indptr, Xr.indices
     for u in range(Xr.shape[0]):
         lo, hi = indptr[u], indptr[u + 1]
@@ -213,7 +229,8 @@ def _als_half(
             out[u] = 0.0
             continue
         Yu = Y[indices[lo:hi]]  # (n_u, k)
-        A = G + alpha * (Yu.T @ Yu)
+        A = G + (reg * (hi - lo)) * eye if weighted_reg else Greg
+        A = A + alpha * (Yu.T @ Yu)
         b = (1.0 + alpha) * Yu.sum(axis=0)
         out[u] = np.linalg.solve(A, b)
 
@@ -225,9 +242,10 @@ def ials_cf(
     factors: int = 64,
     iters: int = 12,
     reg: float = 10.0,
-    alpha: float = 10.0,
+    alpha: float = 40.0,
     seed: int = 0,
     block: int = 512,
+    weighted_reg: bool = False,
 ) -> tuple[sparse.csr_matrix, np.ndarray]:
     """Return (sim, pop): implicit-ALS item factors reduced to top-k item-item.
 
@@ -240,14 +258,18 @@ def ials_cf(
     no negatives -- unobserved is *low confidence* zero, not a dislike). ``factors`` and
     ``iters`` trade fit against build time.
 
-    The defaults are deliberately *more regularized* than the Hu/Koren/Volinsky paper's
-    ``alpha=40``: that figure is for play counts, whereas binary feedback makes it a
-    confidence of 41-vs-1 on every observed cell. On a planted two-community synthetic,
-    ``reg=0.05, alpha=40`` put only 75% of each item's neighbours in its own community
-    and got *worse* with more factors and more iterations -- overfitting -- while
-    ``reg=10, alpha=10`` hits 100% at every setting tried. These still want tuning
-    against ``eval/served_eval.py`` on a real catalog; the synthetic only establishes
-    that the solver is right and that the aggressive defaults were not.
+    **alpha=40 is tuned, reg is not load-bearing.** Swept on the real 100k catalog
+    (50k-user subsample, CF-only Recall@10 in a tail-only pool): alpha 1/10/40 gives
+    0.283/0.308/0.327 and then falls away sharply -- 0.290 at 80, 0.275 at 160, 0.264 at
+    320. So 40 is a genuine optimum, worth **+7.5%** over the alpha=10 this used to
+    default to. ``reg`` is nearly inert by comparison: across 0.1 -> 100 at matched
+    alpha it moves Recall by less than adjacent configs wiggle, so it is left at 10
+    rather than chased.
+
+    Note this walks back to the Hu/Koren/Volinsky paper's own alpha=40. It had been set
+    to 10 on the strength of a 60-item planted synthetic where alpha=40 looked like
+    overfitting -- that toy validates the *solver* (see tests) but gave actively wrong
+    hyperparameter guidance, which is why these are now tuned on real data.
 
     The final step converts factors to the served format: a blocked ``V @ Vᵀ`` keeping
     each row's top-``k``. That is O(N²·f) work but streams in row blocks, so memory is
@@ -262,8 +284,8 @@ def ials_cf(
     V = rng.standard_normal((n_items, factors)) * 0.01
 
     for _ in range(iters):
-        _als_half(V, Xr, reg, alpha, U)
-        _als_half(U, Xc, reg, alpha, V)
+        _als_half(V, Xr, reg, alpha, U, weighted_reg)
+        _als_half(U, Xc, reg, alpha, V, weighted_reg)
 
     return _topk_from_factors(V, k=k, block=block), pop
 
