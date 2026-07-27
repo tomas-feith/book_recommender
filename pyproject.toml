@@ -80,6 +80,7 @@ omit = [
     "eval/diversity.py",
     "eval/learned_rerank.py",
     "eval/served_eval.py",
+    "eval/repr_sweep.py",
 ]
 
 [tool.coverage.report]
