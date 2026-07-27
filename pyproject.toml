@@ -15,6 +15,9 @@ dependencies = [
 
 [tool.uv]
 # torch's default PyPI wheels are CPU-only on Windows, which is what we want.
+# gitpython enters transitively via streamlit; floor it past the 3.1.5x security
+# advisories (pip-audit) without declaring it a direct dependency of the app.
+constraint-dependencies = ["gitpython>=3.1.55"]
 
 [build-system]
 requires = ["hatchling"]
