@@ -91,7 +91,10 @@ def main() -> None:
     ap.add_argument("--factors", type=int, default=64, help="iALS latent dimensions")
     ap.add_argument("--iters", type=int, default=12, help="iALS alternations")
     ap.add_argument("--reg", type=float, default=10.0, help="iALS ridge term")
-    ap.add_argument("--alpha", type=float, default=10.0, help="iALS confidence weight")
+    # Must track cf_build.ials_cf's own default. It was left at 10 when the sweep moved
+    # the library default to 40, and because argparse always passes a value through, the
+    # stale CLI default silently overrode the tuned one on every rebuild.
+    ap.add_argument("--alpha", type=float, default=40.0, help="iALS confidence weight (tuned: 40)")
     ap.add_argument("--max-items", type=int, default=EASE_MAX_ITEMS, help="EASE budget")
     ap.add_argument(
         "--out", type=Path, default=None, help="output npz (default <data>/real_cf.npz)"

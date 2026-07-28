@@ -53,17 +53,6 @@ lines above are the portable equivalent of `just serve`. In bash:
 PORT=$(uv run --no-sync python scripts/freeport.py) && uv run --no-sync streamlit run streamlit_app.py --server.port "$PORT"
 ```
 
-> **Caveat — `freeport.py` does not detect an already-running Streamlit on Windows.**
-> It probes with a plain `bind()`, but Streamlit's listener sets `SO_REUSEADDR`, and
-> Windows then lets a second `bind()` to the same address succeed — so the probe reports
-> the port free and hands back 8501 while the app is serving on it. `SO_EXCLUSIVEADDRUSE`
-> on the probe socket does *not* fix this; only a `connect()` probe detects a live
-> listener. Until that's changed, check first:
->
-> ```powershell
-> netstat -ano | Select-String ':8501'      # any output = something is already listening
-> ```
-
 > **`just` is optional and needs `sh`.** The [`justfile`](justfile) wraps these same
 > commands, but `just` shells out to `sh`, which is not on PATH in a stock PowerShell
 > install — so `just serve` fails there even with `just` installed. Every recipe has a
@@ -244,7 +233,7 @@ load time and rebuilt only when an input's mtime changes: `catalog.db`, `emb.f16
 | Script | Purpose |
 |--------|---------|
 | `scripts/ingest_goodreads_ucsd.py` | **The current catalog source.** Ingest the [UCSD Goodreads dataset](https://cseweb.ucsd.edu/~jmcauley/datasets/goodreads.html) (~2.3M books, ~876M interactions **with ratings**): streams the gz files, heap-selects top-N by rating count, dedups editions *inside* the streaming selection, normalizes mixed ISO language codes, maps to the schema (`gr:` ids), and builds embeddings + sparse CF from the *real* interactions — so CF stays strong at scale instead of collapsing to cold-start. Encoding is checkpointed into shard pairs, so a restart resumes. |
-| `scripts/rebuild_cf.py` | **Rebuild CF without re-ingesting.** The ingest streams 10.7 GB to build the user-item matrix then throws it away, making every CF experiment cost ~50 min of I/O. This caches the matrix beside the catalog (`interactions.npz`) and rebuilds in minutes. `--method hybrid` (default) / `ease` / `ials`. **Pass `--alpha 40`** — see the note below the table. |
+| `scripts/rebuild_cf.py` | **Rebuild CF without re-ingesting.** The ingest streams 10.7 GB to build the user-item matrix then throws it away, making every CF experiment cost ~50 min of I/O. This caches the matrix beside the catalog (`interactions.npz`) and rebuilds in minutes. `--method hybrid` (default) / `ease` / `ials`. |
 | `scripts/promote_catalog.py` | **Swap a built catalog into serving, migrating swipes.** `data/app.db` holds real swipe history keyed on the *old* catalog's ids, and book ids are per-source (goodbooks `126` vs Goodreads `gr:5907`), so a straight file copy silently orphans every profile. Matches on normalized title + first author (97% of real swipes carried over). Backs everything up; dry run unless `--apply`. |
 | `scripts/cf_build.py` | CF matrix builders, all emitting the same sparse top-k format — see [CF builders](#cf-builders-ease-ials-and-the-hybrid). |
 | `scripts/hygiene.py` | Ingest-time data hygiene: **dedup** near-duplicate works (normalized title+author, keep the most-complete edition; needs *both* fields, so distinct unattributed works are never merged), and **guess language** from the dominant Unicode script. Pure stdlib. |
@@ -260,12 +249,7 @@ load time and rebuilt only when an input's mtime changes: `catalog.db`, `emb.f16
 | `scripts/fetch_google_books.py` | Add NEW books from the **Google Books API** by subject (`gb:` ids), deduped; writes a JSON list for `add_books`/`refresh --add`. |
 | `scripts/ingest_amazon_reviews.py` | **More CF signal.** Ingest [Amazon Reviews 2023 (Books)](https://amazon-reviews-2023.github.io/) — the structural twin of the Goodreads adapter (meta + reviews → sparse CF, `az:` ids). |
 | `scripts/ingest_openlibrary_dump.py` | **Breadth (content-only).** Ingest the [Open Library bulk dumps](https://openlibrary.org/developers/dumps) (~30M works, CC0), `ol:` ids. No ratings → every book is CF-cold; pair with a ratings source or swipes to grow CF. |
-| `scripts/freeport.py` | Print the first free TCP port at or after 8501 (stdlib only). What the serve commands capture. **Known limitation:** its `bind()` probe can't see a running Streamlit on Windows — see the caveat under [Quick start](#quick-start). |
-
-> **Known inconsistency — `rebuild_cf.py --alpha` defaults to 10, not the tuned 40.**
-> `cf_build.ials_cf` defaults to the measured optimum `alpha=40`, but the CLI passes its
-> own default of `10.0` explicitly, which overrides it. Pass `--alpha 40` until the CLI
-> default is aligned, or you silently give up the ~7.5% the sweep bought.
+| `scripts/freeport.py` | Print the first free TCP port at or after 8501 (stdlib only). What the serve commands capture. Checks both that the port **binds** and that nothing is **listening** on it — a bind test alone reports an actively-served port as free, because a cross-process listener holding `SO_REUSEADDR` lets a second bind succeed on Windows. |
 
 ### CF builders: EASE, iALS, and the hybrid
 
@@ -324,7 +308,7 @@ uv run --no-sync python -u scripts/ingest_goodreads_ucsd.py `
 #    interaction matrix so later sweeps are minutes, not an hour
 uv run --no-sync python -u scripts/rebuild_cf.py --data data_100k `
     --interactions .cache/goodreads/goodreads_interactions_dedup.json.gz `
-    --method hybrid --alpha 40
+    --method hybrid
 
 # 3. preview the swap (dry run: reports how many swipes carry over), then apply
 uv run --no-sync python scripts/promote_catalog.py --from data_100k
@@ -388,7 +372,7 @@ uv run --no-sync python scripts/refresh.py                  # rebuild CF from sw
 For the `gr:` catalog, rebuild from the cached interaction matrix instead:
 
 ```powershell
-uv run --no-sync python scripts/rebuild_cf.py --data data --method hybrid --alpha 40
+uv run --no-sync python scripts/rebuild_cf.py --data data --method hybrid
 ```
 
 The design intent: **content carries new books until real usage accrues; the refresh job

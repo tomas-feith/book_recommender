@@ -18,21 +18,53 @@ import sys
 
 DEFAULT_PORT = 8501
 SEARCH_LIMIT = 50
+# Loopback connect timeout. A closed port refuses immediately, so this only
+# bounds the pathological case (a firewall dropping packets), never the scan.
+PROBE_TIMEOUT = 0.2
+
+
+def _has_listener(port: int) -> bool:
+    """True if something is already accepting connections on this port.
+
+    A bind() test alone is not enough on Windows. Streamlit's listener sets
+    SO_REUSEADDR, and Windows then permits a *second* bind to the same address,
+    so the probe below would report an actively-served port as free and hand it
+    straight back -- the exact case this script exists to prevent.
+    SO_EXCLUSIVEADDRUSE on the probe socket does not help either: it stops
+    others hijacking *our* socket, not us binding over theirs.
+
+    Connecting is the reliable signal. Both loopback families are tried because
+    a server may listen on only one of them (Streamlit binds dual-stack, but a
+    stray process may not).
+    """
+    for family, addr in ((socket.AF_INET, ("127.0.0.1", port)), (socket.AF_INET6, ("::1", port))):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as sock:
+                sock.settimeout(PROBE_TIMEOUT)
+                if sock.connect_ex(addr) == 0:
+                    return True
+        except OSError:
+            continue  # family unavailable (no IPv6 stack) -- not evidence either way
+    return False
 
 
 def is_free(port: int) -> bool:
-    """True if a server can bind this port on all interfaces, as Streamlit does.
+    """True if a server can actually take this port.
 
-    Binds without SO_REUSEADDR on purpose: on Windows that option permits
-    binding a port another process already holds, which would report every
-    port as free.
+    Two independent checks, because each misses what the other catches:
+
+    * ``bind`` -- catches ports held exclusively, and ports we lack permission
+      for. Done without SO_REUSEADDR on purpose; that option would let us bind
+      over a port another process already holds.
+    * ``_has_listener`` -- catches an active server whose own SO_REUSEADDR lets
+      our bind succeed anyway (see above).
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         try:
             sock.bind(("", port))
         except OSError:
             return False
-    return True
+    return not _has_listener(port)
 
 
 def find_free_port(preferred: int = DEFAULT_PORT, limit: int = SEARCH_LIMIT) -> int:
