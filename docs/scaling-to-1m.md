@@ -165,8 +165,8 @@ CSR forces an expensive gather / format conversion. Cheap at 22k, painful at 1M.
 `cf_build.ease_cf` (before the fix):
 
 ```python
-G = np.asarray((X.T @ X).todense(), dtype=np.float64)   # n×n DENSE
-P = np.linalg.inv(G)                                     # O(n³)
+G = np.asarray((X.T @ X).todense(), dtype=np.float64)  # n×n DENSE
+P = np.linalg.inv(G)  # O(n³)
 ```
 
 At n=1M the dense Gram is **1M×1M×8 B = 8 TB**, and the inverse is ~10¹⁸ flops.
