@@ -11,7 +11,7 @@
 #     docker run --rm -p 8501:8501 book-recommender   # -p HOST:8501; change HOST if 8501 is taken
 
 # 3.12 (not 3.14) because faiss-cpu wheels lag the newest CPython.
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /srv
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
