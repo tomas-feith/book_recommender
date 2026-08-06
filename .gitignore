@@ -54,3 +54,6 @@ data_*/
 
 # Catalog promotion backups (scripts/promote_catalog.py)
 data_backup_*/
+
+# Claude project notes (personal)
+CLAUDE.md
