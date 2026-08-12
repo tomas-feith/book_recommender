@@ -14,7 +14,7 @@ import random
 
 import streamlit as st
 
-from app.library import parse_library
+from app.library import LibraryParseError, parse_library
 from app.search import Match
 from app.service import BookRecommenderService
 from app.store import DATA
@@ -118,7 +118,21 @@ def import_library_cb() -> None:
     up = st.session_state.get("library_file")
     if not up:
         return
-    entries = parse_library(up.name, up.getvalue())
+    st.session_state.import_error = None
+    try:
+        entries = parse_library(up.name, up.getvalue())
+    except LibraryParseError as exc:
+        # Expected: the file is not shaped the way we can read.
+        st.session_state.import_error = str(exc)
+        st.session_state.import_summary = None
+        return
+    except Exception as exc:
+        # Unexpected, but this is arbitrary user-supplied bytes going into
+        # csv/openpyxl -- a malformed file must not take the page down with a
+        # raw traceback. Name the type so a real bug is still diagnosable.
+        st.session_state.import_error = f"could not read that file ({type(exc).__name__})"
+        st.session_state.import_summary = None
+        return
     result = svc.import_library(st.session_state.user_id, entries)
     for me in result.matched:
         st.session_state.seeds[me.match.book_id] = me.match.title
@@ -323,6 +337,9 @@ if st.session_state.phase == "onboarding":
             label_visibility="collapsed",
             help="A Goodreads/StoryGraph export or any list with a title (and optional author) column.",
         )
+        import_error = st.session_state.get("import_error")
+        if import_error:
+            st.error(f"Import failed: {import_error}. Try a CSV export instead.")
         summary = st.session_state.get("import_summary")
         if summary:
             st.success(f"Matched {summary['matched']} of {summary['total']} books to the catalog.")

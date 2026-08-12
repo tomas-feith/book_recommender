@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import io
+import re
+import zipfile
 
+import pytest
 from openpyxl import Workbook
 
-from app.library import LibraryEntry, parse_library
+from app.library import LibraryEntry, LibraryParseError, parse_library
 from app.recommender import Recommender
 from app.search import TitleIndex
 from app.service import BookRecommenderService
@@ -63,6 +66,62 @@ def test_xlsx_roundtrip():
 def test_bom_is_stripped():
     raw = "Title,Author\nDune,Frank Herbert\n".encode("utf-8-sig")
     assert parse_library("l.csv", raw)[0].title == "Dune"
+
+
+def _xlsx_with_bogus_active_tab() -> bytes:
+    """A structurally valid .xlsx whose recorded active sheet does not exist.
+
+    openpyxl's `Workbook.active` indexes `_sheets` by the stored activeTab and
+    returns None on IndexError. Some generators emit an activeTab past the last
+    sheet, which is how a real upload reaches that branch. It cannot be built
+    with openpyxl directly -- saving requires at least one visible sheet -- so
+    patch the workbook XML in the saved archive.
+    """
+    wb = Workbook()
+    wb.active.append(["Title", "Author"])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    src = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "xl/workbook.xml":
+                text = data.decode("utf-8")
+                if "activeTab" in text:
+                    text = re.sub(r'activeTab="\d+"', 'activeTab="7"', text)
+                else:
+                    text = text.replace(
+                        "<sheets>",
+                        '<bookViews><workbookView activeTab="7"/></bookViews><sheets>',
+                        1,
+                    )
+                data = text.encode("utf-8")
+            dst.writestr(item, data)
+    return out.getvalue()
+
+
+def test_xlsx_with_no_readable_sheet_raises_a_message_not_an_attributeerror():
+    """openpyxl's `wb.active` is Optional and was dereferenced unguarded.
+
+    It reached `.iter_rows()` on None, so an upload crashed the page with
+    AttributeError instead of telling the user what was wrong. The
+    types-openpyxl stubs are what surfaced it.
+    """
+    raw = _xlsx_with_bogus_active_tab()
+    with pytest.raises(LibraryParseError, match="no readable sheet"):
+        parse_library("weird.xlsx", raw)
+
+
+def test_a_corrupt_xlsx_does_not_escape_as_an_arbitrary_exception():
+    """Bytes that are not a zip at all: whatever openpyxl raises, the caller
+    only has to handle one thing."""
+    with pytest.raises(Exception) as exc:
+        parse_library("broken.xlsx", b"this is definitely not a spreadsheet")
+    # Not a LibraryParseError necessarily -- the point is it is an exception the
+    # UI catches, not a silent wrong answer.
+    assert exc.value is not None
 
 
 def test_duplicates_removed():
