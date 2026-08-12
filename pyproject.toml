@@ -2,7 +2,11 @@
 name = "book-recommender"
 version = "0.1.0"
 description = "Swipe-based book recommender: seed, swipe, and adaptive-hybrid recommendations."
+readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Tomás Feith" }]
 dependencies = [
     "numpy>=1.26",
     "streamlit>=1.60.0",
@@ -15,9 +19,13 @@ dependencies = [
 
 [tool.uv]
 # torch's default PyPI wheels are CPU-only on Windows, which is what we want.
-# gitpython enters transitively via streamlit; floor it past the 3.1.5x security
-# advisories (pip-audit) without declaring it a direct dependency of the app.
-constraint-dependencies = ["gitpython>=3.1.55"]
+# gitpython enters transitively via streamlit; floor it past the security
+# advisories pip-audit reports, without declaring it a direct dependency.
+# This floor goes stale silently -- it sat at 3.1.55 while 3.1.57 resolved with
+# five open advisories (GHSA-9rj7-rf2p-w77r, -4gmw-gg2m-w46p, -hh9p-6wh2-4mfc,
+# -wvpp-8hx9-p66j, -jm78-9fvv-mhgr), all fixed in 3.1.58. The `audit` CI job is
+# continue-on-error, so it reports rather than blocks: check it after a bump.
+constraint-dependencies = ["gitpython>=3.1.58"]
 
 [build-system]
 requires = ["hatchling"]
@@ -88,4 +96,7 @@ omit = [
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 65
+# A ratchet against regressions, not a quality claim (currently ~78%). Measure
+# source only -- counting the test files inflates it. app/external.py (live HTTP)
+# and app/ann.py (needs a built FAISS index) are the thin ones.
+fail_under = 75

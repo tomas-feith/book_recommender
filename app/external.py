@@ -43,7 +43,9 @@ def to_record(doc: dict, with_description: bool = False) -> dict | None:
     title = doc.get("title")
     if not key.startswith("/works/") or not title or not doc.get("author_name"):
         return None
-    subjects = [s.lower() for s in doc.get("subject", []) if s.replace(" ", "").isalpha()][:5]
+    # `or []`, not a .get default: Open Library returns an explicit null for these
+    # on some works, and a default only covers the key being absent.
+    subjects = [s.lower() for s in (doc.get("subject") or []) if s.replace(" ", "").isalpha()][:5]
     langs = doc.get("language") or ["eng"]
     cover = doc.get("cover_i")
     return {
