@@ -10,7 +10,7 @@ authors = [{ name = "Tomás Feith" }]
 dependencies = [
     "numpy>=1.26",
     "streamlit>=1.60.0",
-    "sentence-transformers>=5.6.1",
+    "sentence-transformers>=5.7.0",
     "torch>=2.2",
     "scipy>=1.18.0",
     "openpyxl>=3.1.5",
