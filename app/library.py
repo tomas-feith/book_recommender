@@ -20,6 +20,10 @@ TITLE_HEADERS = {"title", "name", "book", "book title", "booktitle", "original t
 AUTHOR_HEADERS = {"author", "authors", "by", "writer", "author l-f"}
 
 
+class LibraryParseError(Exception):
+    """The upload could not be read. Message is safe to show to the user."""
+
+
 @dataclass(frozen=True)
 class LibraryEntry:
     title: str
@@ -61,10 +65,21 @@ def _read_xlsx(raw: bytes) -> list[list[str]]:
     from openpyxl import load_workbook  # optional dep, imported lazily
 
     wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-    ws = wb.active
-    rows = [["" if c is None else str(c) for c in row] for row in ws.iter_rows(values_only=True)]
-    wb.close()
-    return rows
+    try:
+        ws = wb.active
+        if ws is None:
+            # openpyxl returns None when the workbook holds no sheets, or its
+            # recorded active index points at nothing. This is user-uploaded
+            # input, so it has to be a message rather than an AttributeError
+            # off the end of `.iter_rows`.
+            raise LibraryParseError("that spreadsheet has no readable sheet")
+        return [
+            ["" if c is None else str(c) for c in row] for row in ws.iter_rows(values_only=True)
+        ]
+    finally:
+        # read_only=True keeps the underlying archive open; close it even if the
+        # rows above raise, which the previous straight-line version did not.
+        wb.close()
 
 
 def _detect_columns(header: list[str]) -> tuple[int | None, int | None]:
