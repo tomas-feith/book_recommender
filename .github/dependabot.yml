@@ -7,14 +7,32 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 5
     groups:
+      # Dev tooling batched: a bad ruff or mypy bump is a lint diff, not a
+      # behaviour change.
       dev-tools:
         dependency-type: "development"
+        patterns:
+          - "*"
+      # Runtime PATCH bumps batched as well -- the high-volume, low-risk
+      # majority. Minor and major runtime bumps stay individual, because torch,
+      # faiss and sentence-transformers can change recommendation output.
+      runtime-patch:
+        dependency-type: "production"
+        update-types:
+          - "patch"
+        patterns:
+          - "*"
 
   # GitHub Actions used in the workflows
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      # One PR for all action bumps: independent and individually trivial.
+      actions:
+        patterns:
+          - "*"
 
   # base image in the Dockerfile
   - package-ecosystem: "docker"
