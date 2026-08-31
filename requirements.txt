@@ -1,5 +1,5 @@
 # Core harness — runs with just this:
-numpy>=1.24
+numpy>=2.5.2
 
 # Optional: real embedding models. Install in a Python version with torch
 # wheels available (as of now, 3.11–3.13 are safest; 3.14 wheels may lag).
