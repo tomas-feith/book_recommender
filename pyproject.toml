@@ -8,11 +8,11 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "TomÃ¡s Feith" }]
 dependencies = [
-    "numpy>=1.26",
+    "numpy>=2.5.2",
     "streamlit>=1.61.1",
     "sentence-transformers>=5.7.0",
     "torch>=2.2",
-    "scipy>=1.18.0",
+    "scipy>=1.18.1",
     "openpyxl>=3.1.5",
     "faiss-cpu>=1.15.0",
 ]
