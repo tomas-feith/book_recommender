@@ -35,14 +35,14 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "hypothesis>=6.100",
-    "mypy>=2.3.0",
+    "hypothesis>=6.170.13",
+    "mypy>=2.4.1",
     "pip-audit>=2.10.1",
-    "pre-commit>=4.6.1",
-    "pytest>=9.1.1",
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
-    "ruff>=0.16.1",
-    "types-openpyxl>=3.1",
+    "ruff>=0.17.3",
+    "types-openpyxl>=3.1.5.20261017",
 ]
 
 [tool.hatch.build.targets.wheel]
